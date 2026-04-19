@@ -65,7 +65,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 SLURM_SCRIPT="scripts/run_mt_metrix.slurm"
-EXPECTED_ENV="mt-metrix"    # match `conda env list` exactly
+# Conda env is a prefix path on scratch (user volume can't hold torch+vllm+comet).
+# Override via CONDA_ENV_PREFIX=... if you moved the env elsewhere.
+CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-/mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/conda_env}"
 FLAKY_NODE="aisurrey26"     # silent 1:0 exits 2026-04
 
 red()   { printf '\033[31m%s\033[0m\n' "$*" >&2; }
@@ -111,17 +113,13 @@ else
     yel "  warn: sinfo not on PATH; skipping live partition check (are you on aisurrey-submit01?)"
 fi
 
-# ---------------------------------------------------------------- check 3: conda env
+# ---------------------------------------------------------------- check 3: conda env (prefix path on scratch)
 
-echo "[3/5] conda env check (env is '$EXPECTED_ENV')..."
-if command -v conda >/dev/null 2>&1; then
-    if ! conda env list 2>/dev/null | awk '{print $1}' | grep -qx "$EXPECTED_ENV"; then
-        fail "conda env '$EXPECTED_ENV' not found. Check casing: 'conda env list' shows the canonical name."
-    fi
-    ok "conda env '$EXPECTED_ENV' present"
-else
-    yel "  warn: conda not on PATH; slurm script will try to activate it at job start"
+echo "[3/5] conda env check (prefix $CONDA_ENV_PREFIX)..."
+if [ ! -f "$CONDA_ENV_PREFIX/bin/python" ]; then
+    fail "conda env not found at $CONDA_ENV_PREFIX. Run: bash scripts/setup_cluster.sh"
 fi
+ok "conda env present at $CONDA_ENV_PREFIX"
 
 # ---------------------------------------------------------------- check 4: no duplicate job
 

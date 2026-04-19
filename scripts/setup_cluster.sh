@@ -24,7 +24,11 @@ set -euo pipefail
 REPO_URL="${REPO_URL:-https://github.com/dipteshkanojia/mt-metrix.git}"  # override with REPO_URL=git@... if SSH key configured
 SCRATCH="${SCRATCH:-/mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix}"
 WORKDIR="$SCRATCH/repo"
-ENV_NAME="mt-metrix"
+# Conda env lives on scratch as a prefix path, NOT in /mnt/fast/nobackup/users/$USER
+# (which has a small quota). mt-metrix + torch 2.4.1 + vllm + comet deps = ~10 GB;
+# the user volume fills up fast. Scratch is purged every 4 weeks, but re-running
+# this script recreates the env idempotently, so that's fine.
+CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-$SCRATCH/conda_env}"
 PYTHON_VER="3.10"
 TORCH_PIN="torch==2.4.1 --index-url https://download.pytorch.org/whl/cu121"
 
@@ -61,17 +65,28 @@ else
     cd "$WORKDIR"
 fi
 
-# ------------------------------------------------- 3. conda env
+# ------------------------------------------------- 3. conda env (prefix path on scratch)
 
-green "=== 3. Conda env '$ENV_NAME' ==="
+green "=== 3. Conda env at $CONDA_ENV_PREFIX ==="
 source "$(conda info --base)/etc/profile.d/conda.sh"
-if conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
-    echo "  env '$ENV_NAME' exists, activating..."
-    conda activate "$ENV_NAME"
+
+# Warn if an old 'mt-metrix' env exists on the user volume — likely leftover
+# from a previous failed install that hit the quota. User can remove it to
+# free space; we continue either way using the scratch prefix env.
+if conda env list 2>/dev/null | awk '{print $1}' | grep -qx "mt-metrix"; then
+    yel "  NOTE: an old 'mt-metrix' env exists in the default conda envs dir"
+    yel "        (likely partial from a previous user-volume ENOSPC failure)."
+    yel "        To reclaim space, run:    conda env remove -n mt-metrix -y"
+    yel "        Continuing with scratch-prefix env below."
+fi
+
+if [ -f "$CONDA_ENV_PREFIX/bin/python" ]; then
+    echo "  env exists, activating..."
+    conda activate "$CONDA_ENV_PREFIX"
 else
-    echo "  creating env '$ENV_NAME' (python $PYTHON_VER)..."
-    conda create -n "$ENV_NAME" "python=$PYTHON_VER" -y
-    conda activate "$ENV_NAME"
+    echo "  creating env at $CONDA_ENV_PREFIX (python $PYTHON_VER)..."
+    conda create -p "$CONDA_ENV_PREFIX" "python=$PYTHON_VER" -y
+    conda activate "$CONDA_ENV_PREFIX"
 fi
 
 # torch pin first — cluster driver is CUDA 12.06; 2.4.1+cu121 is the known-good build
@@ -110,7 +125,8 @@ cat <<EOF
 
 Scratch:   $SCRATCH
 Repo:      $WORKDIR
-Env:       $ENV_NAME (activate with: conda activate $ENV_NAME)
+Env:       $CONDA_ENV_PREFIX
+           activate with: conda activate $CONDA_ENV_PREFIX
 Outputs:   $SCRATCH/outputs/
 HF cache:  $SCRATCH/hf_cache/
 

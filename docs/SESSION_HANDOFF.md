@@ -131,8 +131,11 @@ them whenever the cluster surface is in scope.
 2. **`aisurrey26` is flaky** (silent `1:0` exits observed 2026-04).
    `submit.sh` always adds `--exclude=aisurrey26`.
 
-3. **Conda env is `mt-metrix`**. Match the case shown in `conda env list`
-   — `MT-metrix` / `mtmetrix` fail.
+3. **Conda env lives on scratch as a prefix path**, at
+   `/mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/conda_env`.
+   Activate with `conda activate <that path>`, not `conda activate mt-metrix`.
+   The user volume (`/mnt/fast/nobackup/users/$USER`) can't hold the full
+   torch + vllm + comet stack — scratch is the only place with room.
 
 4. **Filesystem topology matters.** `/vol/research/...` is login-only,
    invisible to compute nodes. Everything a job needs must live under
@@ -252,7 +255,7 @@ Every subsequent session:
 ssh aisurrey
 cd /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/repo
 git pull
-conda activate mt-metrix
+conda activate /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/conda_env
 scripts/submit.sh configs/runs/<some-config>.yaml
 ```
 

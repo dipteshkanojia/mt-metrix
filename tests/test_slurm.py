@@ -183,9 +183,11 @@ def test_run_slurm_has_a100_default_partition():
     assert "--partition=gpu" not in txt
 
 
-def test_run_slurm_activates_mt_metrix_env():
+def test_run_slurm_activates_scratch_prefix_env():
     txt = resolve_run_slurm_script(REPO_ROOT).read_text()
-    assert "conda activate mt-metrix" in txt
+    # Env lives at $SCRATCH/conda_env (prefix path) not a named env on
+    # /mnt/fast/nobackup/users — user volume can't hold torch+vllm+comet deps.
+    assert 'conda activate "$SCRATCH/conda_env"' in txt
 
 
 def test_submit_sh_rejects_partition_gpu_literal():

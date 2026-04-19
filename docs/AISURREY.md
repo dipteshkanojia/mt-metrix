@@ -172,7 +172,7 @@ End-to-end, from scratch:
 ssh aisurrey
 cd /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/repo
 git pull
-conda activate mt-metrix
+conda activate /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/conda_env
 
 # all four Surrey domain matrices (legal / general / tourism / health)
 scripts/submit_aisurrey.sh

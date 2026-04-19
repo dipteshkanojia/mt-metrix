@@ -80,7 +80,7 @@ Gotchas (do not improvise around these):
   `3090` / `3090_risk` (24 GB), `2080ti` (11 GB), `debug` (4h cap).
 - **`aisurrey26` is flaky** (silent `1:0` exits, 2026-04); the wrapper
   always excludes it.
-- **Conda env is `mt-metrix`.** Match the case from `conda env list`.
+- **Conda env is a prefix path on scratch** (`$SCRATCH/conda_env`), not a named env. Activate with `conda activate /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/conda_env`. The user volume can't hold torch + vllm + comet deps.
 - **torch pin: `torch==2.4.1+cu121`.** Newer/older builds cause silent
   NCCL mismatches.
 - **HF cache** must be redirected to scratch via `HF_HOME`,

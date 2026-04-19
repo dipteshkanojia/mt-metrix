@@ -71,9 +71,9 @@ if [ -f "$HOME/.hf_token" ]; then
     export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"
 fi
 
-# --- Conda env (case-sensitive; check with `conda env list`) ---
+# --- Conda env (prefix path on scratch — user volume can't hold torch+vllm+comet) ---
 source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate mt-metrix
+conda activate "$SCRATCH/conda_env"
 
 # --- Torch sanity (cluster driver is CUDA 12.06; torch 2.4.1+cu121 is the pin) ---
 python -c "import torch; print('torch', torch.__version__, 'CUDA', torch.version.cuda, 'available', torch.cuda.is_available())"
