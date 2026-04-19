@@ -8,9 +8,9 @@
 #   sbatch --exclude=aisurrey26 scripts/run_mt_metrix.slurm \
 #          configs/runs/surrey_legal_cometkiwi.yaml
 #
-# Override partition / gres on the CLI for smaller or bigger GPUs:
+# Override partition / gres / mem on the CLI for smaller or bigger jobs:
 #   scripts/submit.sh configs/runs/example_quick.yaml -p 3090 --gres=gpu:1
-#   scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml --gres=gpu:2
+#   scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml --mem=256G
 #
 # The config path is passed as $1; the job name and log file are derived
 # from the config filename (set by submit.sh) or default to the script name.
@@ -31,11 +31,23 @@
 # card with vLLM; Tower-13B fits on 2× 48 GB or 1× A100. Only Tower-72B and
 # COMET-XXL actually need A100. Check summary.json::peak_gpu_memory_gb from
 # a prior run to pick the smallest partition that covers your workload.
+#
+# Right-size CPU RAM (--mem) — this is separate from GPU VRAM and was the
+# root cause of the 2026-04-19 matrix OOMs. unbabel-comet + pytorch-lightning
+# materialise the full model in CPU RAM first, then move it to GPU. Plan:
+#   sacrebleu / CometKiwi-DA (~1.5 GB) / Tower-2B (vllm):   32 GB covers it
+#   CometKiwi-XL / XCOMET-XL-QE (~12 GB) / Tower-7B:        64 GB baseline
+#   CometKiwi-XXL / XCOMET-XXL-QE (~40 GB fp32 state dict)  128 GB default
+#   Full matrix (xxl + Tower-13B) / Tower-72B-awq:          256 GB override
+# 128 GB is the safe default for any single scorer including XXL. Decoder-heavy
+# or full-matrix jobs should override with `--mem=256G` at submit time. Watch
+# for `slurmstepd: Detected 1 oom_kill event` with NO CUDA traceback — that's
+# the kernel OOM killer enforcing this cgroup limit.
 
 #SBATCH --partition=a100             # override with -p on the CLI
 #SBATCH --gres=gpu:1                 # override with --gres=gpu:N
 #SBATCH --cpus-per-task=8            # dataloader workers
-#SBATCH --mem=64G                    # CPU RAM; bump for vLLM on big Tower
+#SBATCH --mem=128G                   # CPU RAM floor for XXL COMET load; 256G for full matrix + Tower-13B+
 #SBATCH --time=24:00:00              # 24h; most runs finish in <4h
 #SBATCH --output=logs/slurm_%j_%x.out
 #SBATCH --error=logs/slurm_%j_%x.err
@@ -51,12 +63,13 @@ echo "Job name:  $JOBNAME"
 echo "Node:      ${SLURMD_NODENAME:-unknown}"
 echo "Partition: ${SLURM_JOB_PARTITION:-unknown}"
 echo "GPU:       ${CUDA_VISIBLE_DEVICES:-none}"
+echo "Mem (cg):  ${SLURM_MEM_PER_NODE:-unknown} MB"
 echo "Date:      $(date)"
 echo "==============================="
 
 # --- Scratch layout (compute-visible; $HOME and /vol/research are NOT) ---
 export SCRATCH="${SCRATCH:-/mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix}"
-mkdir -p "$SCRATCH/models" "$SCRATCH/hf_cache" "$SCRATCH/outputs" logs
+mkdir -p "$SCRATCH/models" "$SCRATCH/hf_cache" "$SCRATCH/outputs" "$SCRATCH/tmp" "$SCRATCH/pip_cache" logs
 
 # --- HuggingFace cache (must NOT live under $HOME — too small, not always compute-visible) ---
 export HF_HOME="$SCRATCH/hf_cache"
@@ -65,11 +78,32 @@ export TRANSFORMERS_CACHE="$HF_HOME/transformers"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export COMET_CACHE="$SCRATCH/models/comet"
 
+# --- Redirect /tmp and pip cache to scratch so on-the-fly weight downloads
+# --- + any surprise pip fetch don't fill the tiny login-node /tmp.
+export TMPDIR="$SCRATCH/tmp"
+export PIP_CACHE_DIR="$SCRATCH/pip_cache"
+
 # --- HF auth for gated COMET / Tower models ---
 if [ -f "$HOME/.hf_token" ]; then
     export HF_TOKEN="$(cat "$HOME/.hf_token")"
     export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"
+    echo "HF token:  loaded from ~/.hf_token"
+else
+    echo "HF token:  NOT FOUND (~/.hf_token missing)."
+    echo "           Gated models (wmt22-cometkiwi-da, XCOMET-*, all Tower)"
+    echo "           will fail to download. If this run uses only public models"
+    echo "           (sacrebleu, wmt20/22-comet-da) you can ignore this warning."
 fi
+
+# --- Resource sanity dump (these are the first things to check after an OOM) ---
+echo
+echo "----- scratch / RAM / disk sanity -----"
+echo "SCRATCH=$SCRATCH"
+df -h "$SCRATCH" 2>/dev/null || echo "(df -h failed on $SCRATCH)"
+df -h /tmp 2>/dev/null | tail -1
+free -h 2>/dev/null || echo "(free -h unavailable)"
+echo "--------------------------------------"
+echo
 
 # --- Conda env (prefix path on scratch — user volume can't hold torch+vllm+comet) ---
 source "$(conda info --base)/etc/profile.d/conda.sh"

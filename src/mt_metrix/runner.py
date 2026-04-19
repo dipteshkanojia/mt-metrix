@@ -13,6 +13,11 @@ Key decisions:
   ``skipped_metrics``.
 - Parse / OOM errors inside a scorer are caught and recorded per-scorer so
   one bad metric doesn't nuke the whole run.
+- Outputs are persisted after **every** scorer (both success and skip) and
+  once before the loop. A mid-loop kill (host-RAM OOM, wall-clock,
+  SIGTERM) then still leaves a coherent ``segments.tsv`` + ``summary.json``
+  reflecting everything scored up to that point, so ``mt-metrix tabulate``
+  can aggregate partial runs.
 """
 from __future__ import annotations
 
@@ -67,6 +72,17 @@ def run(config: RunConfig) -> Path:
     corpus_scores: dict[str, Any] = {}
     skipped_metrics: list[dict[str, Any]] = []
 
+    # Build metadata once — shelling out to `git rev-parse` on every
+    # incremental persist would be wasteful.
+    run_metadata = _build_metadata(config)
+
+    # Seed an empty snapshot up-front so even a crash in the first scorer
+    # still leaves a parseable summary.json on disk.
+    _persist(
+        out_dir, config, segments, scores_by_name, skipped_metrics,
+        corpus_scores, run_metadata,
+    )
+
     for scorer_cfg in config.scorers:
         name = scorer_cfg.name
         try:
@@ -74,6 +90,10 @@ def run(config: RunConfig) -> Path:
         except Exception as e:
             log.error("could not build scorer %s: %s", name, e)
             skipped_metrics.append({"name": name, "reason": f"build-failed: {e}"})
+            _persist(
+                out_dir, config, segments, scores_by_name, skipped_metrics,
+                corpus_scores, run_metadata,
+            )
             continue
 
         if scorer.needs_reference and not has_any_references:
@@ -83,6 +103,10 @@ def run(config: RunConfig) -> Path:
             )
             skipped_metrics.append(
                 {"name": name, "reason": "dataset-has-no-references"}
+            )
+            _persist(
+                out_dir, config, segments, scores_by_name, skipped_metrics,
+                corpus_scores, run_metadata,
             )
             continue
 
@@ -106,6 +130,10 @@ def run(config: RunConfig) -> Path:
                 scorer.unload()
             except Exception:  # pragma: no cover
                 pass
+            _persist(
+                out_dir, config, segments, scores_by_name, skipped_metrics,
+                corpus_scores, run_metadata,
+            )
             continue
         finally:
             try:
@@ -140,27 +168,47 @@ def run(config: RunConfig) -> Path:
 
         log.info("  %s done in %.1fs", name, time.time() - t_scorer)
 
-    # --- outputs ---
+        # Persist after every successful scorer — a mid-loop OOM in a
+        # LATER scorer still leaves this one's results on disk.
+        _persist(
+            out_dir, config, segments, scores_by_name, skipped_metrics,
+            corpus_scores, run_metadata,
+        )
+
+    log.info("run complete: %s", out_dir)
+    return out_dir
+
+
+def _persist(
+    out_dir: Path,
+    config: RunConfig,
+    segments: list[Segment],
+    scores_by_name: dict[str, list[SegmentScore]],
+    skipped_metrics: list[dict[str, Any]],
+    corpus_scores: dict[str, Any],
+    run_metadata: dict[str, Any],
+) -> None:
+    """Snapshot current run state to disk.
+
+    Called before the scorer loop and after every scorer iteration — each
+    call fully rewrites the three output files with the current in-memory
+    state, so a mid-loop crash leaves a coherent partial output that
+    ``mt-metrix tabulate`` can aggregate like any other run.
+    """
     formats = set(config.output.formats)
     if "tsv" in formats:
         write_segments_tsv(out_dir / "segments.tsv", segments, scores_by_name)
-        log.info("wrote %s", out_dir / "segments.tsv")
     if "jsonl" in formats:
         write_segments_jsonl(out_dir / "segments.jsonl", segments, scores_by_name)
-        log.info("wrote %s", out_dir / "segments.jsonl")
     if "summary" in formats:
         write_summary(
             out_dir / "summary.json",
             segments,
             scores_by_name,
             skipped_metrics=skipped_metrics,
-            run_metadata=_build_metadata(config),
+            run_metadata=run_metadata,
             corpus_scores=corpus_scores,
         )
-        log.info("wrote %s", out_dir / "summary.json")
-
-    log.info("run complete: %s", out_dir)
-    return out_dir
 
 
 def _build_metadata(config: RunConfig) -> dict[str, Any]:
