@@ -4,7 +4,10 @@
 
 kind: huggingface
 repo: surrey-nlp/Legal-QE
-# config: en-gujarati     # pick a subset; leave unset for the default config
+# Legal-QE has NO default config — you must pick a language subset.
+# Available: en-gujarati, en-tamil, en-telugu. For per-language runs,
+# clone this file and switch `config:` rather than editing in place.
+config: en-gujarati
 split: test
 domain: legal
 columns:

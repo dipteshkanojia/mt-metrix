@@ -13,6 +13,9 @@ run:
 dataset:
   kind: huggingface
   repo: surrey-nlp/Legal-QE
+  # surrey-nlp/Legal-QE ships three language subsets — pick one explicitly.
+  # en-gujarati is the smallest, keeps the smoke under a minute of download.
+  config: en-gujarati
   split: test
   domain: legal
   limit: 20
