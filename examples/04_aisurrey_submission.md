@@ -15,7 +15,7 @@ ssh aisurrey
 # installs mt-metrix with [comet,tower] extras, runs the smoke tests.
 mkdir -p /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix
 cd /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix
-git clone git@github.com:dipteshkanojia/mt-metrix.git repo
+git clone https://github.com/dipteshkanojia/mt-metrix.git repo    # SSH requires key setup; HTTPS works out of the box on AISURREY
 bash repo/scripts/setup_cluster.sh
 ```
 

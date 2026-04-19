@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-REPO_URL="git@github.com:dipteshkanojia/mt-metrix.git"
+REPO_URL="${REPO_URL:-https://github.com/dipteshkanojia/mt-metrix.git}"  # override with REPO_URL=git@... if SSH key configured
 SCRATCH="${SCRATCH:-/mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix}"
 WORKDIR="$SCRATCH/repo"
 ENV_NAME="mt-metrix"
