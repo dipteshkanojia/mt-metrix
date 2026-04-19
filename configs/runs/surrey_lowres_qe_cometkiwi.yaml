@@ -1,0 +1,30 @@
+# Low-resource-QE-DA × CometKiwi-22 — smoke / sanity run.
+#
+# Runs CometKiwi-22 (reference-free) on the multilingual test split
+# (engu/enhi/enmr/enta/ente/eten/neen/sien, ~7,700 rows total). Pearson /
+# Spearman / Kendall vs `z_mean` land in summary.json; per-segment scores in
+# segments.tsv and segments.jsonl. The `lang_pair` column from the dataset
+# propagates through, so `mt-metrix tabulate` can pivot per pair.
+#
+# Notes:
+#   - CometKiwi is gated on HF — accept the licence and set HF_TOKEN.
+#   - The dataset covers mixed directions (5× en→Indic + 3× X→en). CometKiwi
+#     was trained predominantly on en→X data, so expect weaker correlations
+#     on eten / neen / sien. The tabulate pivot will make the gap visible.
+#   - Expected runtime on one L40s 48GB (nice-project): ~15–25 minutes.
+#
+# Recommended submit on AISURREY (nice-project for smoke; a100 only if busy):
+#   scripts/submit.sh configs/runs/surrey_lowres_qe_cometkiwi.yaml \
+#     -p nice-project --gres=gpu:1 --mem=32G --time=01:00:00
+
+run:
+  id: surrey_lowres_qe_cometkiwi
+
+dataset: !include ../datasets/surrey_lowres_qe.yaml
+
+scorers:
+  - ref: comet/wmt22-cometkiwi-da
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]

@@ -1,0 +1,45 @@
+# surrey-nlp/Low-resource-QE-DA-dataset — sentence-level Direct Assessment
+# quality estimation across eight low-resource language pairs, released with
+# the ALOPE paper (Sindhujan et al., 2024, COLM 2024, arXiv:2508.07484).
+#
+# Nine subsets are available on HF:
+#   Per-pair (en → Indic):   engu, enhi, enmr, enta, ente
+#   Per-pair (X → en):       eten, neen, sien
+#   Concatenated:            multilingual — has a `lang_pair` column
+#
+# We load the `multilingual` subset (single HF call) because it carries the
+# per-row `lang_pair` tag the tabulate command needs for pair-wise pivots.
+# The per-pair subsets do NOT expose a lang_pair column, so they would all
+# blend into one undistinguishable blob under the default loader.
+#
+# Columns (multilingual subset):
+#   index, original (source), translation (MT), scores (3 raters), mean,
+#   z_scores (3 z-normalised raters), z_mean, lang_pair.
+#
+# Target: z_mean — per-pair z-normalised DA, the ALOPE paper's headline
+# gold signal. `mean` is kept in meta for reference but not used for
+# correlation. The `lang_pair` column holds short pair-codes (e.g. `engu`,
+# `enhi`); tabulate will pivot on these verbatim.
+#
+# QE-only — no reference column. Reference-based scorers (BLEU, chrF++,
+# TER, COMET-DA ref) are automatically skipped with a visible warning and
+# recorded in summary.json::skipped_metrics.
+#
+# Test split sizes (verified via HF parquet API, 2026-04):
+#   engu ~1,000  |  enhi ~1,000  |  enmr ~700   |  enta ~1,000  |  ente ~1,000
+#   eten ~1,000  |  neen ~1,000  |  sien ~1,000
+#   multilingual ~7,700 rows total (concatenation of the eight above).
+#
+# https://hf.co/datasets/surrey-nlp/Low-resource-QE-DA-dataset
+
+kind: huggingface
+repo: surrey-nlp/Low-resource-QE-DA-dataset
+config: multilingual
+split: test
+domain: lowres_qe
+columns:
+  source: original
+  target: translation
+  gold: z_mean
+  lang_pair: "@from:lang_pair"
+  domain: "@constant:lowres_qe"

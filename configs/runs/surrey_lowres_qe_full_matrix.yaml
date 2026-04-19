@@ -1,0 +1,80 @@
+# Surrey Low-resource-QE-DA — FULL matrix: COMET × Tower × sacrebleu.
+#
+# Flagship run for the `Low-resource-QE-DA-dataset` (ALOPE dataset).
+# Runs every QE-capable metric on the full multilingual test split
+# (~7,700 rows across 8 low-resource pairs) and records correlations with
+# `z_mean` in summary.json. Reference-based entries are retained in the
+# scorer list so summary.json's `skipped_metrics` documents they were
+# considered but skipped (this dataset has no reference column).
+#
+# Recommended execution on AISURREY (via the pre-flight wrapper):
+#   scripts/submit.sh configs/runs/surrey_lowres_qe_full_matrix.yaml \
+#     --mem=256G --time=24:00:00
+#
+# IMPORTANT — CPU RAM sizing (learned 2026-04-19):
+#   This matrix chains CometKiwi-XXL (~40 GB fp32 state dict loaded into
+#   CPU RAM before GPU transfer) AND Tower-13B / Tower-72B (vLLM CPU copy
+#   before sharding). The slurm default `--mem=128G` is enough for any
+#   SINGLE scorer including XXL, but not for the full matrix. Override
+#   `--mem=256G` at submit time. Without that override, expect:
+#     slurmstepd: Detected 1 oom_kill event  (no CUDA traceback)
+#   at the xxl checkpoint load — the kernel OOM killer enforcing the
+#   cgroup limit, NOT a GPU OOM.
+#
+# Crash recovery: the runner persists segments.tsv + summary.json after
+# EVERY scorer, so a mid-loop OOM in Tower-72B (say) still leaves all
+# prior scorers' results on disk for `mt-metrix tabulate` to aggregate.
+#
+# Volume note: this dataset is ~3× the size of Legal-QE (7.7k vs 2.7k).
+# Budget ~6–10 h for the light COMET tier, another ~8–12 h for Tower-13B+,
+# and Tower-72B-awq alone can be a similar order of magnitude on its own.
+# If the queue is tight, split `--mem=128G` CometKiwi-XL-and-below into
+# one job and the XXL / 13B+ tail into a second job.
+#
+# To run locally instead (sequential, one scorer at a time):
+#   mt-metrix score --config configs/runs/surrey_lowres_qe_full_matrix.yaml
+
+run:
+  id: surrey_lowres_qe_full_matrix
+
+dataset: !include ../datasets/surrey_lowres_qe.yaml
+
+scorers:
+  # --- COMET QE family (reference-free) ---------------------------------
+  - ref: comet/wmt22-cometkiwi-da
+  - ref: comet/wmt23-cometkiwi-da-xl
+  - ref: comet/wmt23-cometkiwi-da-xxl
+  - ref: comet/xcomet-xl-qe
+  - ref: comet/xcomet-xxl-qe
+  - ref: comet/wmt20-comet-qe-da
+  - ref: comet/wmt21-comet-qe-da
+  - ref: comet/wmt21-comet-qe-mqm
+
+  # --- COMET reference-based (will be skipped, no refs) -----------------
+  - ref: comet/wmt22-comet-da
+  - ref: comet/eamt22-cometinho-da
+  - ref: comet/xcomet-xl
+  - ref: comet/xcomet-xxl
+
+  # --- Tower (GEMBA-DA) --------------------------------------------------
+  - ref: tower/tower-plus-2b
+  - ref: tower/towerinstruct-7b-v0.2
+  - ref: tower/towerinstruct-mistral-7b-v0.2
+  - ref: tower/towerinstruct-wmt24-chat-7b
+  - ref: tower/towerinstruct-13b-v0.1
+  - ref: tower/tower-plus-9b
+  - ref: tower/tower-plus-72b
+
+  # --- Tower (GEMBA-MQM) -------------------------------------------------
+  - ref: tower/towerinstruct-7b-v0.2-mqm
+  - ref: tower/tower-plus-9b-mqm
+
+  # --- sacrebleu (reference-based, will be skipped) ---------------------
+  - ref: sacrebleu/bleu
+  - ref: sacrebleu/chrf
+  - ref: sacrebleu/chrf++
+  - ref: sacrebleu/ter
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]
