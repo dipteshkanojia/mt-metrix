@@ -1,9 +1,13 @@
 # surrey-nlp/health-QE — domain-specific QE for Indic health-domain translations.
-# Lang pairs: en-gu, en-hi, en-mr, en-ta.
+# Subsets (verified via HF parquet API 2026-04): en-gujarati, en-hindi,
+# en-marathi, en-tamil.
 # https://hf.co/datasets/surrey-nlp/health-QE
 
 kind: huggingface
 repo: surrey-nlp/health-QE
+# Load all four language subsets and concatenate. Per-row `language_pair`
+# column keeps the pairs separable for the tabulate command's pivot.
+configs: [en-gujarati, en-hindi, en-marathi, en-tamil]
 split: test
 domain: health
 columns:

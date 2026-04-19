@@ -173,3 +173,147 @@ def test_missing_source_or_target_raises(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="missing source or target"):
         load_dataset_from_config(cfg)
+
+
+# ---------------------------------------------------------------------------
+# HuggingFace multi-subset loader
+# ---------------------------------------------------------------------------
+
+class _FakeHFDataset:
+    """Minimal stand-in for a ``datasets.Dataset`` — just iterable dicts."""
+
+    def __init__(self, rows: list[dict]):
+        self._rows = rows
+
+    def __iter__(self):
+        return iter(self._rows)
+
+    def __len__(self):
+        return len(self._rows)
+
+    def select(self, indices):
+        return _FakeHFDataset([self._rows[i] for i in indices])
+
+
+def _patch_load_dataset(monkeypatch, subsets: dict[str, list[dict]]):
+    """Patch ``datasets.load_dataset`` to return rows keyed by subset name."""
+    import datasets as hf_datasets
+
+    def fake_load(repo, *, split=None, name=None, cache_dir=None, **_kw):
+        if name not in subsets:
+            raise ValueError(f"unknown fake subset {name!r}; have {list(subsets)}")
+        return _FakeHFDataset(list(subsets[name]))
+
+    monkeypatch.setattr(hf_datasets, "load_dataset", fake_load)
+
+
+def test_load_hf_single_subset(monkeypatch):
+    _patch_load_dataset(monkeypatch, {
+        "en-gujarati": [
+            {"source_text": "hello", "target_text": "namaste",
+             "z_mean": 0.8, "language_pair": "en-gu"},
+            {"source_text": "world", "target_text": "duniya",
+             "z_mean": 0.5, "language_pair": "en-gu"},
+        ],
+    })
+    cfg = DatasetConfig(
+        kind="huggingface",
+        params={"repo": "fake/Legal-QE", "config": "en-gujarati", "split": "test",
+                "domain": "legal"},
+        columns={
+            "source": "source_text",
+            "target": "target_text",
+            "gold": "z_mean",
+            "lang_pair": "@from:language_pair",
+            "domain": "@constant:legal",
+        },
+    )
+    segs = load_dataset_from_config(cfg)
+    assert len(segs) == 2
+    assert segs[0].lang_pair == "en-gu"
+    assert segs[0].domain == "legal"
+    assert segs[1].source == "world"
+
+
+def test_load_hf_multi_subset_concatenates(monkeypatch):
+    _patch_load_dataset(monkeypatch, {
+        "en-gujarati": [
+            {"source_text": "a", "target_text": "A", "z_mean": 0.9,
+             "language_pair": "en-gu"},
+        ],
+        "en-tamil": [
+            {"source_text": "b", "target_text": "B", "z_mean": 0.7,
+             "language_pair": "en-ta"},
+            {"source_text": "c", "target_text": "C", "z_mean": 0.3,
+             "language_pair": "en-ta"},
+        ],
+        "en-telugu": [
+            {"source_text": "d", "target_text": "D", "z_mean": 0.6,
+             "language_pair": "en-te"},
+        ],
+    })
+    cfg = DatasetConfig(
+        kind="huggingface",
+        params={
+            "repo": "fake/Legal-QE",
+            "configs": ["en-gujarati", "en-tamil", "en-telugu"],
+            "split": "test",
+            "domain": "legal",
+        },
+        columns={
+            "source": "source_text",
+            "target": "target_text",
+            "gold": "z_mean",
+            "lang_pair": "@from:language_pair",
+            "domain": "@constant:legal",
+        },
+    )
+    segs = load_dataset_from_config(cfg)
+    # 1 + 2 + 1 = 4 segments, in the order the subsets were listed
+    assert [s.lang_pair for s in segs] == ["en-gu", "en-ta", "en-ta", "en-te"]
+    assert all(s.domain == "legal" for s in segs)
+    # Segment IDs are unique across subsets (global counter, not per-subset)
+    assert len({s.segment_id for s in segs}) == 4
+
+
+def test_load_hf_multi_subset_limit_caps_total(monkeypatch):
+    _patch_load_dataset(monkeypatch, {
+        "a": [{"source_text": f"s{i}", "target_text": f"t{i}", "z_mean": 0.1,
+               "language_pair": "en-a"} for i in range(5)],
+        "b": [{"source_text": f"s{i}", "target_text": f"t{i}", "z_mean": 0.1,
+               "language_pair": "en-b"} for i in range(5)],
+    })
+    cfg = DatasetConfig(
+        kind="huggingface",
+        params={"repo": "fake/X", "configs": ["a", "b"], "split": "test", "limit": 7},
+        columns={
+            "source": "source_text", "target": "target_text", "gold": "z_mean",
+            "lang_pair": "@from:language_pair", "domain": "@constant:test",
+        },
+    )
+    segs = load_dataset_from_config(cfg)
+    # limit applies to total across subsets: all 5 of "a" then 2 of "b"
+    assert len(segs) == 7
+    assert [s.lang_pair for s in segs] == ["en-a"] * 5 + ["en-b"] * 2
+
+
+def test_load_hf_rejects_both_config_and_configs(monkeypatch):
+    _patch_load_dataset(monkeypatch, {"x": []})
+    cfg = DatasetConfig(
+        kind="huggingface",
+        params={"repo": "fake/X", "config": "x", "configs": ["x"]},
+        columns={"source": "s", "target": "t"},
+    )
+    with pytest.raises(ValueError, match="cannot set both"):
+        load_dataset_from_config(cfg)
+
+
+def test_load_hf_rejects_non_list_configs(monkeypatch):
+    _patch_load_dataset(monkeypatch, {"x": []})
+    cfg = DatasetConfig(
+        kind="huggingface",
+        params={"repo": "fake/X", "configs": "not-a-list"},
+        columns={"source": "s", "target": "t"},
+    )
+    with pytest.raises(ValueError, match="must be a list"):
+        load_dataset_from_config(cfg)

@@ -7,6 +7,7 @@ Subcommands::
     mt-metrix list-models [--family comet|tower|sacrebleu]
     mt-metrix list-datasets
     mt-metrix correlate --run <run_id_or_path>
+    mt-metrix tabulate --runs-glob <pattern> --out <dir> [--metric spearman]
     mt-metrix download --family comet --to <path>
 
 ``submit`` is a thin Python wrapper around ``scripts/submit.sh`` — the
@@ -135,6 +136,27 @@ def _cmd_correlate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_tabulate(args: argparse.Namespace) -> int:
+    setup_logging(level=args.log_level)
+    from mt_metrix.reports.tabulate import tabulate
+
+    out_dir = Path(args.out).expanduser().resolve()
+    try:
+        paths = tabulate(
+            runs_glob=args.runs_glob,
+            out_dir=out_dir,
+            metric=args.metric,
+        )
+    except FileNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    print(f"✓ wrote results.csv    → {paths['csv']}")
+    print(f"✓ wrote paper_table.md → {paths['md']}")
+    print(f"✓ wrote paper_table.tex→ {paths['tex']}")
+    return 0
+
+
 def _cmd_download(args: argparse.Namespace) -> int:
     setup_logging(level=args.log_level)
     from huggingface_hub import snapshot_download
@@ -210,6 +232,27 @@ def build_parser() -> argparse.ArgumentParser:
     corr = sub.add_parser("correlate", help="recompute correlations from an existing segments.tsv")
     corr.add_argument("--run", required=True, help="path to outputs/<run_id>/ or segments.tsv")
     corr.set_defaults(func=_cmd_correlate)
+
+    # tabulate — build a paper-ready cross-domain × cross-lang correlation matrix
+    tab = sub.add_parser(
+        "tabulate",
+        help="aggregate many run outputs into a paper-matrix table",
+    )
+    tab.add_argument(
+        "--runs-glob", required=True,
+        help="glob expanding to run dirs, each with summary.json + segments.tsv "
+             "(e.g. 'outputs/surrey_*_full_matrix')",
+    )
+    tab.add_argument(
+        "--out", required=True,
+        help="directory to write results.csv, paper_table.md, paper_table.tex into",
+    )
+    tab.add_argument(
+        "--metric", default="spearman",
+        choices=["pearson", "spearman", "kendall", "spa"],
+        help="which correlation to surface in the rendered tables (default: spearman)",
+    )
+    tab.set_defaults(func=_cmd_tabulate)
 
     # download
     dl = sub.add_parser("download", help="prefetch scorer model weights")

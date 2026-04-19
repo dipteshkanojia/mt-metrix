@@ -124,32 +124,55 @@ def _load_local(cfg: DatasetConfig) -> list[Segment]:
 
 
 def _load_huggingface(cfg: DatasetConfig) -> list[Segment]:
+    """Load one or more subsets from a HuggingFace dataset repo.
+
+    Accepts either ``config`` (single subset name) or ``configs`` (list of
+    subset names to concatenate). Multi-subset is how we build domain-wide
+    matrices from repos like ``surrey-nlp/Legal-QE``, which ship one subset
+    per language pair (``en-gujarati``, ``en-tamil``, ``en-telugu``).
+    ``limit`` caps the total segment count after concatenation.
+    """
     from datasets import load_dataset
 
     repo = cfg.params["repo"]
-    config_name = cfg.params.get("config")
+    single = cfg.params.get("config")
+    multi = cfg.params.get("configs")
+    if single is not None and multi is not None:
+        raise ValueError(
+            "dataset config cannot set both 'config' (single subset) and "
+            "'configs' (list of subsets) — pick one"
+        )
+    if multi is not None and not isinstance(multi, (list, tuple)):
+        raise ValueError(
+            f"'configs' must be a list of subset names, got {type(multi).__name__}"
+        )
+
     split = cfg.params.get("split", "test")
     cache_dir = cfg.params.get("cache_dir")
     limit = cfg.params.get("limit")
-
-    log.info("loading HF dataset %s (config=%s, split=%s)", repo, config_name, split)
-    kwargs: dict[str, Any] = {"split": split}
-    if config_name is not None:
-        kwargs["name"] = config_name
-    if cache_dir is not None:
-        kwargs["cache_dir"] = cache_dir
-
-    ds = load_dataset(repo, **kwargs)
-    if limit is not None:
-        ds = ds.select(range(min(int(limit), len(ds))))
-
     default_lang = cfg.params.get("lang_pair", "")
     default_domain = cfg.params.get("domain", "general")
+
+    subsets: list[str | None] = list(multi) if multi is not None else [single]
+
     segs: list[Segment] = []
-    for i, row in enumerate(ds):
-        segs.append(
-            _row_to_segment(dict(row), cfg.columns, i, default_lang, default_domain)
-        )
+    idx = 0
+    for subset in subsets:
+        log.info("loading HF dataset %s (config=%s, split=%s)", repo, subset, split)
+        kwargs: dict[str, Any] = {"split": split}
+        if subset is not None:
+            kwargs["name"] = subset
+        if cache_dir is not None:
+            kwargs["cache_dir"] = cache_dir
+
+        ds = load_dataset(repo, **kwargs)
+        for row in ds:
+            segs.append(
+                _row_to_segment(dict(row), cfg.columns, idx, default_lang, default_domain)
+            )
+            idx += 1
+            if limit is not None and idx >= int(limit):
+                return segs
     return segs
 
 

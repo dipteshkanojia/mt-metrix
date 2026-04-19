@@ -1,9 +1,12 @@
 # surrey-nlp/Tourism-QE — domain-specific QE for Indic tourism-domain translations.
-# Lang pairs: en-hi, en-mr, en-te.
+# Subsets (verified via HF parquet API 2026-04): en-hindi, en-marathi, en-telugu.
 # https://hf.co/datasets/surrey-nlp/Tourism-QE
 
 kind: huggingface
 repo: surrey-nlp/Tourism-QE
+# Load all three language subsets and concatenate. Per-row `language_pair`
+# column keeps the pairs separable for the tabulate command's pivot.
+configs: [en-hindi, en-marathi, en-telugu]
 split: test
 domain: tourism
 columns:

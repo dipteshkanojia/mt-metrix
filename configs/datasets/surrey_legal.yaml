@@ -1,13 +1,15 @@
 # surrey-nlp/Legal-QE — domain-specific QE for Indic legal translations.
-# Lang pairs: en-gu, en-ta, en-te. Licence: AFL-3.0.
+# Subsets (verified via HF parquet API 2026-04): en-gujarati, en-tamil, en-telugu.
+# Licence: AFL-3.0.
 # https://hf.co/datasets/surrey-nlp/Legal-QE
 
 kind: huggingface
 repo: surrey-nlp/Legal-QE
-# Legal-QE has NO default config — you must pick a language subset.
-# Available: en-gujarati, en-tamil, en-telugu. For per-language runs,
-# clone this file and switch `config:` rather than editing in place.
-config: en-gujarati
+# Load all three language subsets and concatenate. Per-row `language_pair`
+# column keeps en-gu / en-ta / en-te separable downstream (the tabulate
+# command pivots on it). To scope a run to a single pair, replace `configs`
+# with `config: en-gujarati` (etc.) — the loader accepts either form.
+configs: [en-gujarati, en-tamil, en-telugu]
 split: test
 domain: legal
 columns:

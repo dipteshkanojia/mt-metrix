@@ -1,5 +1,6 @@
 # surrey-nlp/General-QE — domain-specific QE for Indic general-domain translations.
-# Lang pairs: en-gu, en-hi, en-mr, en-ta, en-te.
+# Subsets (verified via HF parquet API 2026-04): en-gujarati, en-hindi,
+# en-marathi, en-tamil, en-telugu.
 # https://hf.co/datasets/surrey-nlp/General-QE
 #
 # Known data quirks (see gyroQE/data/raw/HUGGINGFACE_DATASETS.md):
@@ -8,6 +9,9 @@
 
 kind: huggingface
 repo: surrey-nlp/General-QE
+# Load all five language subsets and concatenate. Per-row `language_pair`
+# column keeps the pairs separable for the tabulate command's pivot.
+configs: [en-gujarati, en-hindi, en-marathi, en-tamil, en-telugu]
 split: test
 domain: general
 columns:
