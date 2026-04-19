@@ -3,11 +3,15 @@
 Subcommands::
 
     mt-metrix score --config <run.yaml> [--override key=value ...]
-    mt-metrix submit --config <run.yaml> --cluster aisurrey [--partition a100] [--gpus 1]
+    mt-metrix submit --config <run.yaml> [sbatch overrides...]
     mt-metrix list-models [--family comet|tower|sacrebleu]
     mt-metrix list-datasets
     mt-metrix correlate --run <run_id_or_path>
     mt-metrix download --family comet --to <path>
+
+``submit`` is a thin Python wrapper around ``scripts/submit.sh`` — the
+canonical pre-flight-checked submit path on AISURREY. Any flags after the
+config are forwarded verbatim to ``sbatch`` inside the wrapper.
 """
 from __future__ import annotations
 
@@ -35,23 +39,31 @@ def _cmd_score(args: argparse.Namespace) -> int:
 
 
 def _cmd_submit(args: argparse.Namespace) -> int:
-    from mt_metrix.submit.slurm import render_and_submit
+    """Submit via scripts/submit.sh (pre-flight + sbatch --test-only + exclude aisurrey26)."""
+    from mt_metrix.submit.slurm import submit_via_wrapper
 
     setup_logging(level=args.log_level)
-    cfg = load_run_config(args.config, overrides=args.override or [])
-    if args.output_root:
-        cfg.output.root = args.output_root
-    returncode, job_id, script_path = render_and_submit(
-        cfg,
-        cluster=args.cluster,
-        partition=args.partition,
-        gpus=args.gpus,
-        time=args.time,
-        dry_run=args.dry_run,
+    # Config is validated inside submit.sh; we don't need to load it here,
+    # but validate existence up-front for a better error message.
+    cfg_path = Path(args.config).resolve()
+    if not cfg_path.is_file():
+        print(f"config not found: {cfg_path}", file=sys.stderr)
+        return 1
+
+    sbatch_args: list[str] = list(args.sbatch_args or [])
+    if args.partition:
+        sbatch_args.extend(["-p", args.partition])
+    if args.gpus:
+        sbatch_args.extend([f"--gres=gpu:{args.gpus}"])
+    if args.time:
+        sbatch_args.extend([f"--time={args.time}"])
+
+    returncode, job_id = submit_via_wrapper(
+        cfg_path, sbatch_args=sbatch_args, dry_run=args.dry_run
     )
-    print(f"SLURM script: {script_path}")
     if args.dry_run:
-        print("[dry-run] not submitted")
+        print("[dry-run] pre-flight passed, not submitted" if returncode == 0
+              else f"[dry-run] pre-flight FAILED (rc={returncode})")
     else:
         print(f"sbatch return code: {returncode}; job id: {job_id}")
     return returncode
@@ -167,16 +179,22 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("--override", action="append", help="key=value override (repeatable)")
     score.set_defaults(func=_cmd_score)
 
-    # submit
-    submit = sub.add_parser("submit", help="render an sbatch script and submit it")
+    # submit — delegates to scripts/submit.sh (pre-flight + sbatch)
+    submit = sub.add_parser(
+        "submit",
+        help="submit via scripts/submit.sh (pre-flight + sbatch on AISURREY)",
+    )
     submit.add_argument("--config", required=True, help="path to a run YAML")
-    submit.add_argument("--cluster", default="aisurrey", choices=["aisurrey"])
-    submit.add_argument("--partition", default=None)
-    submit.add_argument("--gpus", type=int, default=None)
+    submit.add_argument("--partition", default=None,
+                        help="partition (a100|rtx_a6000_risk|l40s_risk|3090|...). "
+                             "NOT 'gpu' — that doesn't exist on AISURREY.")
+    submit.add_argument("--gpus", type=int, default=None,
+                        help="number of GPUs (soft cap: 4). Forwards to --gres=gpu:N.")
     submit.add_argument("--time", default=None, help="SLURM --time (HH:MM:SS)")
-    submit.add_argument("--output-root", default=None)
-    submit.add_argument("--override", action="append", help="key=value override (repeatable)")
-    submit.add_argument("--dry-run", action="store_true", help="render only, don't sbatch")
+    submit.add_argument("--dry-run", action="store_true",
+                        help="run pre-flight checks only, don't submit")
+    submit.add_argument("sbatch_args", nargs="*",
+                        help="extra args forwarded to sbatch (e.g. --mem=128G)")
     submit.set_defaults(func=_cmd_submit)
 
     # list-models

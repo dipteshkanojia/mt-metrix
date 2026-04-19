@@ -26,10 +26,26 @@ mt-metrix score --config configs/runs/example_quick.yaml
 
 # a single CometKiwi run on the full Legal-QE split
 mt-metrix score --config configs/runs/surrey_legal_cometkiwi.yaml
-
-# submit one SLURM job per scorer to AISURREY
-mt-metrix submit --config configs/runs/surrey_legal_full_matrix.yaml
 ```
+
+### On AISURREY
+
+```bash
+# one-time setup (idempotent — safe to re-run):
+ssh aisurrey
+bash /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/repo/scripts/setup_cluster.sh
+
+# every subsequent session:
+cd /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/repo
+git pull
+scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml
+```
+
+`scripts/submit.sh` wraps `sbatch` with five pre-flight checks (partition,
+conda env, duplicates, `sbatch --test-only`) and excludes the flaky
+`aisurrey26` node. See [docs/AISURREY.md](docs/AISURREY.md) and
+[docs/SESSION_HANDOFF.md](docs/SESSION_HANDOFF.md) for the full cluster
+runbook.
 
 Outputs always land under `outputs/<run_id>/`:
 
@@ -77,7 +93,7 @@ mt-metrix/
 │   ├── models/          # catalogues per family (comet.yaml, tower.yaml, ...)
 │   ├── datasets/        # dataset configs
 │   └── runs/            # run configs (recipe = dataset + scorers)
-├── scripts/slurm_templates/   # standalone sbatch templates by model size
+├── scripts/               # submit.sh, run_mt_metrix.slurm, setup_cluster.sh
 ├── docs/                # DESIGN.md, AISURREY.md, MODELS.md, PARAMETERS.md
 ├── examples/            # walkthroughs
 └── tests/               # unit + integration (slow tests gated on env var)
@@ -93,6 +109,10 @@ mt-metrix list-datasets
 mt-metrix correlate      --run <outputs/run_id>
 mt-metrix download       --family comet --to <scratch-dir>
 ```
+
+`mt-metrix submit` is a Python wrapper around `scripts/submit.sh` — same
+pre-flight, same exclude-aisurrey26 behaviour. For interactive cluster
+use, calling the shell script directly is cleaner.
 
 ## Writing a run config
 

@@ -6,10 +6,10 @@
 # summary.json's `skipped_metrics` documents that they were considered but
 # skipped (Legal-QE has no reference column).
 #
-# Recommended execution:
-#   mt-metrix submit --config configs/runs/surrey_legal_full_matrix.yaml
-# This will pick per-scorer SLURM resources (GPU count, memory, time) using
-# the heuristic in submit/slurm.py and submit one sbatch job per scorer.
+# Recommended execution (on AISURREY, via the pre-flight wrapper):
+#   scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml
+# The default a100 / 1 GPU / 24h plan is plenty for COMET; override for
+# Tower-13B+ with e.g. --gres=gpu:2 --mem=128G --time=08:00:00.
 #
 # To run locally instead (one scorer at a time, in-process):
 #   mt-metrix score --config configs/runs/surrey_legal_full_matrix.yaml

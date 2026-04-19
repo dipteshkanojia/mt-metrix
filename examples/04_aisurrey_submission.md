@@ -1,115 +1,142 @@
 # 04 — Submitting to AISURREY
 
-`mt-metrix submit` renders an sbatch script that wraps `mt-metrix score`. The
-same code path runs locally and on the cluster — submission is just SLURM
-glue around it.
+The canonical submit path is `scripts/submit.sh` — a bash wrapper that
+runs five pre-flight checks, calls `sbatch --test-only` to validate the
+plan against the live cluster, and submits with `--exclude=aisurrey26`.
 
-Read `docs/AISURREY.md` for the full cluster runbook. This example is the
-short version.
+Read `docs/AISURREY.md` for the full cluster runbook, `docs/SESSION_HANDOFF.md`
+for the fresh-session briefing. This example is the short version.
 
-## 0. One-time setup (on the login node)
+## 0. One-time cluster setup (idempotent)
 
 ```bash
 ssh aisurrey
-
-# env + install
-conda create -n mt-metrix python=3.10 -y && conda activate mt-metrix
-pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cu121
-cd ~ && git clone https://github.com/dipteshkanojia/mt-metrix.git
-cd mt-metrix && pip install -e ".[comet,tower]"
-
-# scratch layout
-export SCRATCH=/mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix
-mkdir -p $SCRATCH/{models,hf-cache,outputs}
-
-# HF token (gated COMET + all Tower)
-echo "hf_xxx..." > ~/.hf_token
-chmod 600 ~/.hf_token
+# Clones the repo into scratch, creates conda env with torch 2.4.1+cu121,
+# installs mt-metrix with [comet,tower] extras, runs the smoke tests.
+mkdir -p /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix
+cd /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix
+git clone git@github.com:dipteshkanojia/mt-metrix.git repo
+bash repo/scripts/setup_cluster.sh
 ```
 
-## 1. Pre-download weights (one-off)
+After the first run this script just updates the repo and re-runs tests.
+Re-run it whenever you pull new dependencies.
+
+Don't forget the HF token for gated models (CometKiwi-DA/XL/XXL,
+XCOMET-XL/XXL, all Tower):
 
 ```bash
-conda activate mt-metrix
-
-mt-metrix download --family comet --to $SCRATCH/models
-mt-metrix download --family tower --to $SCRATCH/models     # large — ~400GB for 72B
+echo "hf_xxx..." > ~/.hf_token && chmod 600 ~/.hf_token
+# Accept licences on huggingface.co under the same account.
 ```
 
-## 2. Dry-run the submission
+## 1. Dry-run the submission (pre-flight only)
 
-`--dry-run` writes the sbatch file under `outputs/submitted/<run_id>.sbatch`
-without calling `sbatch`. Review it to confirm resources make sense.
+`--dry-run` runs the five pre-flight checks and `sbatch --test-only`, but
+does NOT queue the job. Use this whenever you're unsure about a config
+change or a partition override.
 
 ```bash
-mt-metrix submit \
-    --config configs/runs/surrey_legal_full_matrix.yaml \
-    --dry-run
-
-cat outputs/submitted/surrey_legal_full_matrix.sbatch
+cd /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/repo
+git pull
+scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml --dry-run
 ```
 
-Look for:
-- `#SBATCH --partition=a100`
-- `#SBATCH --exclude=aisurrey26`
-- Correct `--gres=gpu:N` and `--time=HH:MM:SS`
-- `export HF_HOME="$SCRATCH/hf-cache"` and `export COMET_CACHE=...`
+The wrapper prints its checks as it goes:
+```
+[1/5] config file check...     ok: configs/runs/surrey_legal_full_matrix.yaml
+[2/5] partition sanity check...ok: partition 'a100' exists
+[3/5] conda env check...       ok: conda env 'mt-metrix' present
+[4/5] duplicate job check...   ok: no duplicates of 'surrey_legal_full_matrix' in queue
+[5/5] sbatch --test-only...    ok: dry-run accepted
+dry-run mode: pre-flight OK, not submitting.
+```
 
-## 3. Actually submit
+## 2. Actually submit
 
 ```bash
-mt-metrix submit --config configs/runs/surrey_legal_full_matrix.yaml
+scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml
 ```
 
-Output:
-```
-SLURM script: /home/you/mt-metrix/outputs/submitted/surrey_legal_full_matrix.sbatch
-sbatch return code: 0; job id: 1234567
+Output ends with `Submitted batch job 1234567`. Logs go to
+`logs/slurm_<jobid>_<config>.{out,err}` in the repo root.
+
+## 3. Override partition / GPU count / wall time
+
+The default is `--partition=a100 --gres=gpu:1 --time=24:00:00`. Overrides
+pass straight through to sbatch:
+
+```bash
+# 48 GB card (good for CometKiwi-XL, Tower-13B)
+scripts/submit.sh configs/runs/surrey_legal_all_comet.yaml \
+    -p rtx_a6000_risk --gres=gpu:1
+
+# 2 GPUs on a100 for bigger Tower runs
+scripts/submit.sh configs/runs/surrey_legal_tower_plus.yaml \
+    --gres=gpu:2 --mem=128G --time=08:00:00
+
+# Cheap smoke on 24 GB card
+scripts/submit.sh configs/runs/example_quick.yaml -p 3090_risk
 ```
 
-Monitor:
+**Right-size after the first run.** Check
+`outputs/<run_id>/summary.json::peak_gpu_memory_gb` and move to the
+cheapest partition that covers it — see the table in `docs/AISURREY.md`.
+
+## 4. All four Surrey domains at once
+
+```bash
+scripts/submit_aisurrey.sh                   # legal, general, tourism, health
+scripts/submit_aisurrey.sh legal general     # just these two
+scripts/submit_aisurrey.sh legal -p rtx_a6000_risk  # override partition
+```
+
+Each matrix submits independently. Results land under
+`$SCRATCH/outputs/surrey_<domain>_full_matrix/`.
+
+## 5. Monitor + post-mortem
 
 ```bash
 squeue -u $USER
-tail -f outputs/slurm-logs/slurm-1234567.out
+tail -f logs/slurm_<jobid>_<config>.err
+sacct -j <jobid> --format=JobID,State,ExitCode,NodeList,Elapsed
 ```
 
-## 4. Override resources
-
-The heuristic picks resources from the biggest model in the run. Override:
-
-```bash
-mt-metrix submit \
-    --config configs/runs/surrey_legal_full_matrix.yaml \
-    --gpus 4 \
-    --time 12:00:00 \
-    --partition a100_long
-```
-
-## 5. All four domains in one go
-
-```bash
-for domain in legal general tourism health; do
-    mt-metrix submit --config configs/runs/surrey_${domain}_full_matrix.yaml
-done
-```
-
-Each job runs independently. Results land under
-`$SCRATCH/outputs/surrey_<domain>_full_matrix/`.
+`ExitCode=1:0` with no traceback usually means a flaky node. `submit.sh`
+already excludes `aisurrey26`; if another node misbehaves, scancel and
+resubmit.
 
 ## 6. Recomputing correlations
 
-Useful if you want to try different correlation metrics, or analyse a
+Useful if you want to try different correlation metrics or analyse a
 subset (e.g. per language pair) without re-running inference:
 
 ```bash
 mt-metrix correlate --run $SCRATCH/outputs/surrey_legal_full_matrix
 ```
 
-## Split the matrix across jobs
+## 7. Python API (optional)
 
-For very large runs, split per-scorer or per-language-pair into separate
-files so each job can be tuned:
+If you need to submit from Python (e.g. a training loop that launches
+evaluation jobs), use the wrapper directly — same pre-flight, same
+excludes:
+
+```python
+from mt_metrix.submit.slurm import submit_via_wrapper
+
+rc, job_id = submit_via_wrapper(
+    "configs/runs/surrey_legal_cometkiwi.yaml",
+    sbatch_args=["-p", "rtx_a6000_risk", "--gres=gpu:1"],
+)
+```
+
+Internally this shells out to `scripts/submit.sh` so you inherit the full
+pre-flight.
+
+## 8. Split a matrix into per-model jobs
+
+For very large runs, split per-scorer into separate configs so each job
+gets its own resource plan:
 
 ```yaml
 # configs/runs/surrey_legal_kiwi_only.yaml
@@ -129,5 +156,5 @@ scorers:
   - ref: tower/tower-plus-72b
 ```
 
-Submit each separately — different resource plans, parallel jobs on the
-queue.
+Submit each separately — different partitions / GPU counts, parallel jobs
+on the queue.

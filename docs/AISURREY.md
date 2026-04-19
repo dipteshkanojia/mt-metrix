@@ -1,48 +1,68 @@
 # Running mt-metrix on AISURREY
 
-AISURREY cluster specifics layered on top of
-`~/Documents/Claude/agent-context/aisurrey-cluster.md` (global cluster ops).
+AISURREY-specific runbook for mt-metrix. Layered on top of the cluster-wide
+notes in `~/Documents/Claude/agent-context/aisurrey-cluster.md` (topology)
+and `~/Documents/Claude/agent-context/aisurrey-deploy.md` (deploy SOP).
+
+## 30-second version
+
+```bash
+# one-time, from aisurrey-submit01:
+mkdir -p /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix
+cd       /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix
+git clone git@github.com:dipteshkanojia/mt-metrix.git repo
+bash repo/scripts/setup_cluster.sh
+
+# every subsequent session:
+cd /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/repo
+git pull
+scripts/submit.sh configs/runs/<some-config>.yaml
+```
+
+Everything below is explanation of what those commands do and why.
 
 ## Cluster conventions we rely on
 
-- **Partition:** `a100` (also `a100_long` for ≥8h jobs).
-- **Node exclusion:** `--exclude=aisurrey26` — it has a flaky GPU.
-- **Filesystem:** `/vol/research/<group>` is login-only, NOT visible on
-  compute nodes. Use `/mnt/fast/nobackup/scratch4weeks/$USER/` for scratch.
-- **Torch pin:** 2.4.1+cu121 in the `mt-metrix` conda env. Later torch
-  builds have a known incompatibility with this cluster's driver.
-- **Conda:** `~/miniconda3/` is the default; submit scripts source it.
+From `aisurrey-cluster.md` / `aisurrey-deploy.md`:
 
-## One-time setup
+- **No `gpu` partition exists.** Every sbatch line must name a real
+  partition. Defaults to `a100`; see the cheat-sheet in
+  `scripts/run_mt_metrix.slurm`.
+- **`aisurrey26` is flaky** (silent `1:0` exits, 2026-04).
+  `scripts/submit.sh` adds `--exclude=aisurrey26` to every submission.
+- **`/vol/research/...` is login-only, invisible to compute nodes.**
+  All compute-visible work lives under
+  `/mnt/fast/nobackup/scratch4weeks/$USER/` or
+  `/mnt/fast/nobackup/users/$USER/`.
+- **torch pin:** `torch==2.4.1+cu121`. Newer / older builds cause
+  silent NCCL/SM mismatches.
+- **Conda env name is `mt-metrix`** (check casing with `conda env list`).
+- **HF cache** redirected in the sbatch header, not only in `.bashrc`.
+
+## One-time setup (idempotent)
+
+`scripts/setup_cluster.sh` is the single entry point for first-time setup.
+It will:
+
+1. Create `/mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/{models,hf_cache,outputs}`.
+2. Clone the repo to `$SCRATCH/mt-metrix/repo` (or `git pull` if it exists).
+3. Create the `mt-metrix` conda env with Python 3.10 and `torch==2.4.1+cu121`.
+4. `pip install -e ".[comet,tower]"`.
+5. Warn if `~/.hf_token` is missing (needed for gated COMET / Tower models).
+6. Run the fast pytest suite as a smoke test.
+
+Run it interactively on the submit node — NOT as a SLURM job:
 
 ```bash
 ssh aisurrey
-
-# 1. create scratch root
-export SCRATCH=/mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix
-mkdir -p $SCRATCH/{models,hf-cache,outputs}
-
-# 2. conda env
-conda create -n mt-metrix python=3.10 -y
-conda activate mt-metrix
-
-# 3. install torch FIRST (pinned for this cluster)
-pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cu121
-
-# 4. clone + install mt-metrix
-git clone https://github.com/dipteshkanojia/mt-metrix.git
-cd mt-metrix
-pip install -e ".[comet,tower]"
-
-# 5. HuggingFace token (for gated COMET models)
-echo "hf_xxx..." > ~/.hf_token
-chmod 600 ~/.hf_token
+bash /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/repo/scripts/setup_cluster.sh
 ```
 
-## Accepting licences (one-time, on the web)
+## Accepting model licences (one-time, on the web)
 
-Several models are gated and will fail to load without licence acceptance
-under the same HF account whose token sits in `~/.hf_token`:
+Several COMET and Tower checkpoints are gated and will return 401 without
+licence acceptance under the same HF account whose token lives in
+`~/.hf_token`:
 
 - `Unbabel/wmt22-cometkiwi-da`
 - `Unbabel/wmt23-cometkiwi-da-xl`
@@ -52,117 +72,150 @@ under the same HF account whose token sits in `~/.hf_token`:
 
 Visit each model page on HuggingFace Hub and click "Agree and access".
 
-## Pre-downloading model weights
+## Submitting jobs — the canonical path
 
-Doing this once up-front prevents every sbatch job from racing the HF hub
-cache on first use.
-
-```bash
-# all COMET weights into $SCRATCH/models
-mt-metrix download --family comet --to $SCRATCH/models
-
-# all Tower weights (this is a lot of disk — ~400GB for the 72B family)
-mt-metrix download --family tower --to $SCRATCH/models
-
-# or just one model
-mt-metrix download --ref comet/wmt22-cometkiwi-da --to $SCRATCH/models
-```
-
-## Submitting a run
-
-`mt-metrix submit` renders an sbatch script under
-`outputs/submitted/<run_id>.sbatch`, sizes it based on the largest scorer in
-the run, and submits it.
+**`scripts/submit.sh` is the only supported submit path.** It wraps
+`sbatch` with five pre-flight checks (see
+`aisurrey-deploy.md#pre-flight-checklist`):
 
 ```bash
-# dry-run: write the script, don't submit — useful for reviewing resources
-mt-metrix submit --config configs/runs/surrey_legal_cometkiwi.yaml --dry-run
-
-# actually submit
-mt-metrix submit --config configs/runs/surrey_legal_cometkiwi.yaml
-
-# override resources (e.g. bump wall time)
-mt-metrix submit --config configs/runs/surrey_legal_full_matrix.yaml \
-    --gpus 4 --time 12:00:00
+scripts/submit.sh configs/runs/surrey_legal_cometkiwi.yaml
+scripts/submit.sh configs/runs/example_quick.yaml -p 3090 --gres=gpu:1
+scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml --dry-run
 ```
 
-### Size heuristic
+The first argument is always the config path. Any remaining arguments pass
+verbatim to `sbatch`, so `-p`, `--gres`, `--time`, `--mem` all work as
+overrides.
 
-`submit/slurm.py`'s `plan_for` picks resources by the largest model in the
-scorers list:
+The wrapper auto-adds `--exclude=aisurrey26` and sets `--job-name` to the
+config's basename (so logs end up at `logs/slurm_<jobid>_<config>.out`).
 
-| Trigger substring in `model_id`        | Template                 | GPUs | Time     |
-|----------------------------------------|--------------------------|------|----------|
-| `72b`                                  | `tower_72b.sbatch`       | 4    | 08:00:00 |
-| `13b`, `9b`                            | `tower_13b.sbatch`       | 2    | 04:00:00 |
-| `xxl`                                  | `comet_xxl.sbatch`       | 1    | 04:00:00 |
-| `xl`                                   | `comet_xl.sbatch`        | 1    | 02:00:00 |
-| `7b`, `2b`                             | `tower_7b.sbatch`        | 1    | 02:00:00 |
-| everything else                        | `comet_small.sbatch`     | 1    | 01:00:00 |
+## Right-sizing: pick the smallest GPU that fits
 
-If the heuristic picks wrong, override with `--gpus` / `--time` / `--partition`.
+`a100` is the default, but often overkill. After your first run, check
+`outputs/<run_id>/summary.json::peak_gpu_memory_gb` and use the cheapest
+partition that covers it:
+
+| Peak memory | Smallest partition that fits      | `-p` override        |
+|-------------|-----------------------------------|----------------------|
+| ≤ 10 GB     | `2080ti` (11 GB)                  | `-p 2080ti`          |
+| ≤ 22 GB     | `3090` / `3090_risk` (24 GB)      | `-p 3090_risk`       |
+| ≤ 44 GB     | `rtx8000` / `rtx_a6000_risk` / `l40s_risk` (48 GB) | `-p rtx_a6000_risk` |
+| ≤ 76 GB     | `a100` (80 GB)                    | default              |
+
+Approximate mt-metrix sizing (verify with `summary.json::peak_gpu_memory_gb`):
+
+- BLEU / chrF++ / TER: CPU-only — use any partition.
+- COMET-base / CometKiwi-DA: <10 GB — fits on 2080ti, but queue is slow;
+  3090 is usually faster end-to-end.
+- CometKiwi-XL / XCOMET-XL: ~20 GB — 3090 works, 48 GB card is cosier.
+- CometKiwi-XXL / XCOMET-XXL: ~40 GB — 48 GB card minimum.
+- Tower-7B (vLLM): ~18 GB — 3090 works.
+- Tower-13B (vLLM): ~28 GB — 48 GB card.
+- Tower-Plus-72B: needs A100 with `--gres=gpu:2+` and a tensor-parallel vLLM config.
+
+**4-GPU soft cap.** `submit.sh` warns if you request >4 GPUs — getting 8
+on one node is effectively impossible due to contention.
 
 ## Scratch layout
 
 ```
 /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/
-├── models/           # pre-downloaded HF weights
-├── hf-cache/         # HF_HOME (datasets + any on-the-fly downloads)
-│   └── huggingface/
-└── outputs/          # --output-root on the cluster
-    └── <run_id>/     # config.yaml, segments.tsv, segments.jsonl, summary.json
+├── repo/                        # this repo (cloned by setup_cluster.sh)
+├── models/                      # pre-downloaded HF weights (optional)
+│   └── comet/                   # COMET_CACHE lives here
+├── hf_cache/                    # HF_HOME (datasets + on-the-fly downloads)
+│   ├── hub/
+│   ├── transformers/            # TRANSFORMERS_CACHE
+│   └── datasets/                # HF_DATASETS_CACHE
+└── outputs/                     # scoring run outputs (--output-root)
+    └── <run_id>/
+        ├── config.yaml
+        ├── segments.tsv
+        ├── segments.jsonl
+        ├── summary.json
+        └── run.log
 ```
 
-Submitted sbatch jobs export:
+`scripts/run_mt_metrix.slurm` exports these paths in the sbatch header:
+
 ```
 SCRATCH=/mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix
-HF_HOME=$SCRATCH/hf-cache
-HUGGINGFACE_HUB_CACHE=$SCRATCH/hf-cache
-TRANSFORMERS_CACHE=$SCRATCH/hf-cache
+HF_HOME=$SCRATCH/hf_cache
+HUGGINGFACE_HUB_CACHE=$HF_HOME
+TRANSFORMERS_CACHE=$HF_HOME/transformers
+HF_DATASETS_CACHE=$HF_HOME/datasets
 COMET_CACHE=$SCRATCH/models/comet
-HF_TOKEN=$(cat ~/.hf_token)   # if the file exists
+HF_TOKEN=$(cat ~/.hf_token)     # if the file exists
 ```
 
-…so model weights land in scratch, not in `$HOME` (which has a 20GB quota
-you will blow through immediately).
+## Pre-downloading weights (optional)
 
-## Running the flagship matrix
+`scripts/submit.sh` leaves downloads to the first job that uses each
+model. That's fine once `HF_HOME` is on scratch (first-use latency is a
+one-off). If you want to warm the cache deliberately:
 
-End-to-end, from a fresh login to results:
+```bash
+mt-metrix download --family comet --to $SCRATCH/models
+mt-metrix download --ref comet/wmt22-cometkiwi-da --to $SCRATCH/models
+```
+
+Tower-family downloads are large (Tower-Plus-72B is >130 GB); pull only
+what you plan to run.
+
+## Running the flagship matrices
+
+End-to-end, from scratch:
 
 ```bash
 ssh aisurrey
-cd mt-metrix
-git pull                     # in case of updates
-
+cd /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/repo
+git pull
 conda activate mt-metrix
 
-# submit all four domain matrices
-for domain in legal general tourism health; do
-    mt-metrix submit \
-        --config configs/runs/surrey_${domain}_full_matrix.yaml
-done
+# all four Surrey domain matrices (legal / general / tourism / health)
+scripts/submit_aisurrey.sh
 
-# monitor
-squeue -u $USER
+# or one at a time, with a partition override:
+scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml -p a100
 ```
 
-Outputs land under `$SCRATCH/outputs/<run_id>/`. Use `mt-metrix correlate
---run <path>` to regenerate correlations without re-running inference.
+Monitor:
+
+```bash
+squeue -u $USER
+sacct -j <jobid> --format=JobID,State,ExitCode,NodeList,Elapsed
+```
+
+Outputs land under `$SCRATCH/outputs/<run_id>/`. Regenerate correlations
+without re-scoring:
+
+```bash
+mt-metrix correlate --run $SCRATCH/outputs/<run_id>
+```
 
 ## When things go wrong
 
-- **`401 Unauthorized` on model download** → HF token missing or licence not
-  accepted for that specific model. `cat ~/.hf_token`, then visit the model
+- **`sbatch: error: invalid partition specified: gpu`** → you called
+  `sbatch` directly. Use `scripts/submit.sh`; it catches this before
+  submission.
+- **`EnvironmentNameNotFound: mt-metrix`** → env casing mismatch. Run
+  `conda env list` and use the exact name.
+- **`401 Unauthorized` on model download** → HF token missing or licence
+  not accepted for that model. `cat ~/.hf_token`, then visit the model
   page on HF and accept.
-- **`torch.cuda.OutOfMemory` on cometkiwi-xxl** → add `overrides: {batch_size: 4}`
-  to that scorer entry in the run config.
-- **`ImportError: vllm`** → you installed without the `[tower]` extra. Run
-  `pip install -e ".[tower]"` or disable Tower scorers in the run config.
-- **sbatch job stuck in `PD` forever** → a100 queue is full; check
-  `sinfo -p a100`.
-- **aisurrey26 is assigned anyway** → make sure your script has
-  `#SBATCH --exclude=aisurrey26` (all mt-metrix-rendered scripts do).
-- **`HF_HOME` ends up in `$HOME/.cache`** → your conda activate hook is
-  overwriting the env vars. Put `export HF_HOME=$SCRATCH/hf-cache` AFTER
-  `conda activate`.
+- **`torch.cuda.OutOfMemory` on CometKiwi-XXL** → add
+  `overrides: {batch_size: 4}` (or 2) to that scorer entry in the run
+  config.
+- **`ImportError: vllm`** → installed without `[tower]` extra. Run
+  `pip install -e ".[tower]"` or remove Tower scorers from the run.
+- **Job stuck in `PD` forever** → `a100` queue is full. `sinfo -p a100`
+  and consider a 48 GB alternative (`-p rtx_a6000_risk`).
+- **Job exits `1:0` with no traceback** → suspect node. `submit.sh`
+  excludes `aisurrey26`; if it still happens, check
+  `sacct -j <id> --format=JobID,State,ExitCode,NodeList`.
+- **`HF_HOME` ends up in `$HOME/.cache`** → your shell hook overrides the
+  env var after `conda activate`. The sbatch script exports `HF_HOME`
+  *after* `conda activate` already, so this should not happen inside
+  SLURM jobs.

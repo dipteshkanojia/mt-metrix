@@ -69,16 +69,58 @@ def test_cli_correlate_from_existing_run(
     assert set(payload) >= {"bleu", "chrf", "chrf++", "ter"}
 
 
-def test_cli_submit_dry_run(
-    project_root: Path, fixtures_dir: Path, tmp_path: Path, capsys
+def test_cli_submit_dry_run_invokes_wrapper(
+    project_root: Path, fixtures_dir: Path, capsys, monkeypatch
 ):
+    import subprocess
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, capture_output, text, check):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0,
+            stdout="dry-run mode: pre-flight OK, not submitting.\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.chdir(project_root)
     rc = main([
         "submit",
         "--config", str(fixtures_dir / "tiny_run_with_ref.yaml"),
-        "--output-root", str(tmp_path),
         "--dry-run",
     ])
     assert rc == 0
+    assert calls, "submit.sh was not invoked"
+    cmd = calls[0]
+    assert cmd[0].endswith("scripts/submit.sh")
+    assert "--dry-run" in cmd
     out = capsys.readouterr().out
-    assert "SLURM script" in out
     assert "[dry-run]" in out
+
+
+def test_cli_submit_forwards_partition_and_gpus(
+    project_root: Path, fixtures_dir: Path, monkeypatch
+):
+    import subprocess
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, capture_output, text, check):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="Submitted batch job 99\n", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.chdir(project_root)
+    main([
+        "submit",
+        "--config", str(fixtures_dir / "tiny_run_with_ref.yaml"),
+        "--partition", "rtx_a6000_risk",
+        "--gpus", "1",
+        "--time", "02:00:00",
+    ])
+    cmd = calls[0]
+    assert "-p" in cmd and "rtx_a6000_risk" in cmd
+    assert "--gres=gpu:1" in cmd
+    assert "--time=02:00:00" in cmd

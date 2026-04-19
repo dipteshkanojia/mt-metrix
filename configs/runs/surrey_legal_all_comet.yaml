@@ -9,7 +9,7 @@
 #   - XL/XXL checkpoints (cometkiwi-xl/xxl, XCOMET-XL/XXL) need A100 80GB.
 #   - All gated — ensure HF_TOKEN is set and licences accepted.
 #   - Expected wall-clock on one A100 80GB (sequential): ~45–90 min.
-#   - Submit via: `mt-metrix submit --config configs/runs/surrey_legal_all_comet.yaml`.
+#   - Submit via: `scripts/submit.sh configs/runs/surrey_legal_all_comet.yaml`.
 
 run:
   id: surrey_legal_all_comet

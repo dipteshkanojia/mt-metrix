@@ -1,114 +1,206 @@
-"""Tests for SLURM plan selection + sbatch script rendering."""
+"""Tests for the SLURM submission glue.
+
+The canonical submit path is ``scripts/submit.sh``. Python submission is a
+thin wrapper that shells out to it and parses the job id on success. These
+tests cover:
+
+- Path resolution for ``scripts/submit.sh`` and ``scripts/run_mt_metrix.slurm``.
+- ``submit_via_wrapper`` happy path (monkeypatches subprocess).
+- ``submit_via_wrapper`` sbatch-failure path.
+- The wrapper's ``--dry-run`` flag passes through.
+- The shell wrapper itself is syntactically valid (``bash -n``).
+- The slurm script has the non-negotiable AISURREY safety settings baked in.
+"""
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from mt_metrix.config import DatasetConfig, OutputConfig, RunConfig
-from mt_metrix.scorers.base import ScorerConfig
-from mt_metrix.submit.slurm import plan_for, render_and_submit, render_script
+from mt_metrix.submit.slurm import (
+    FLAKY_NODE,
+    resolve_run_slurm_script,
+    resolve_submit_script,
+    submit_via_wrapper,
+)
 
 
-def _mk_config(model_ids: list[str]) -> RunConfig:
-    return RunConfig(
-        run_id="test",
-        dataset=DatasetConfig(kind="local", params={"path": "tests/fixtures/tiny_with_ref.tsv"}),
-        scorers=[
-            ScorerConfig(family="tower" if "Tower" in m else "comet",
-                         name=m.split("/")[-1].lower(), model=m, params={})
-            for m in model_ids
-        ],
-        output=OutputConfig(),
-    )
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_plan_for_small_model_gets_comet_small():
-    cfg = _mk_config(["Unbabel/wmt22-cometkiwi-da"])
-    plan = plan_for(cfg, partition=None, gpus=None, time=None)
-    assert plan.template == "comet_small.sbatch"
-    assert plan.gpus == 1
+# ---------------------------------------------------------------------------
+# Path resolution
+# ---------------------------------------------------------------------------
+
+def test_resolve_submit_script_finds_scripts_submit_sh():
+    path = resolve_submit_script(REPO_ROOT)
+    assert path == REPO_ROOT / "scripts" / "submit.sh"
+    assert path.is_file()
 
 
-def test_plan_for_xl_gets_comet_xl():
-    cfg = _mk_config(["Unbabel/wmt23-cometkiwi-da-xl"])
-    plan = plan_for(cfg, partition=None, gpus=None, time=None)
-    assert plan.template == "comet_xl.sbatch"
+def test_resolve_submit_script_raises_when_missing(tmp_path: Path):
+    with pytest.raises(FileNotFoundError, match="submit.sh not found"):
+        resolve_submit_script(tmp_path)
 
 
-def test_plan_for_xxl_gets_comet_xxl():
-    cfg = _mk_config(["Unbabel/XCOMET-XXL"])
-    plan = plan_for(cfg, partition=None, gpus=None, time=None)
-    assert plan.template == "comet_xxl.sbatch"
+def test_resolve_run_slurm_script_finds_template():
+    path = resolve_run_slurm_script(REPO_ROOT)
+    assert path == REPO_ROOT / "scripts" / "run_mt_metrix.slurm"
+    assert path.is_file()
 
 
-def test_plan_for_tower_7b():
-    cfg = _mk_config(["Unbabel/TowerInstruct-7B-v0.2"])
-    plan = plan_for(cfg, partition=None, gpus=None, time=None)
-    assert plan.template == "tower_7b.sbatch"
+# ---------------------------------------------------------------------------
+# submit_via_wrapper — monkeypatched subprocess
+# ---------------------------------------------------------------------------
 
+def test_submit_via_wrapper_parses_job_id(monkeypatch, tmp_path: Path):
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("run:\n  id: x\n")
 
-def test_plan_for_tower_13b_gets_2_gpus():
-    cfg = _mk_config(["Unbabel/TowerInstruct-13B-v0.1"])
-    plan = plan_for(cfg, partition=None, gpus=None, time=None)
-    assert plan.template == "tower_13b.sbatch"
-    assert plan.gpus == 2
+    def fake_run(cmd, capture_output, text, check):
+        assert cmd[0].endswith("submit.sh")
+        assert cmd[1] == str(cfg)
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="pre-flight OK. Submitting...\nSubmitted batch job 123456\n",
+            stderr="",
+        )
 
-
-def test_plan_for_tower_72b_gets_4_gpus():
-    cfg = _mk_config(["Unbabel/Tower-Plus-72B"])
-    plan = plan_for(cfg, partition=None, gpus=None, time=None)
-    assert plan.template == "tower_72b.sbatch"
-    assert plan.gpus == 4
-
-
-def test_plan_for_picks_largest_model_in_mixed_run():
-    cfg = _mk_config([
-        "Unbabel/wmt22-cometkiwi-da",
-        "Unbabel/TowerInstruct-13B-v0.1",
-    ])
-    plan = plan_for(cfg, partition=None, gpus=None, time=None)
-    # 13B wins over base COMET
-    assert plan.gpus == 2
-
-
-def test_plan_for_honours_cli_overrides():
-    cfg = _mk_config(["Unbabel/wmt22-cometkiwi-da"])
-    plan = plan_for(cfg, partition="gpu", gpus=3, time="06:00:00")
-    assert plan.partition == "gpu"
-    assert plan.gpus == 3
-    assert plan.time == "06:00:00"
-
-
-def test_render_script_substitutes_fields(tmp_path: Path):
-    cfg = _mk_config(["Unbabel/wmt22-cometkiwi-da"])
-    plan = plan_for(cfg, partition=None, gpus=None, time=None)
-    script = render_script(
-        cfg, plan,
-        repo_root=tmp_path,
-        config_path=tmp_path / "run.yaml",
-    )
-    assert "#SBATCH --partition=a100" in script
-    assert "#SBATCH --exclude=aisurrey26" in script
-    assert "mt-metrix score" in script
-    assert "HF_HOME" in script
-    assert "COMET_CACHE" in script
-    assert "mtm-test" in script  # job name derived from run_id
-
-
-def test_render_and_submit_dry_run_writes_script(tmp_path: Path, monkeypatch):
-    cfg = _mk_config(["Unbabel/wmt22-cometkiwi-da"])
-    monkeypatch.chdir(tmp_path)
-    rc, job_id, script_path = render_and_submit(
-        cfg, cluster="aisurrey", dry_run=True, repo_root=tmp_path,
-    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rc, job_id = submit_via_wrapper(cfg, repo_root=REPO_ROOT)
     assert rc == 0
+    assert job_id == "123456"
+
+
+def test_submit_via_wrapper_returns_error_on_nonzero(monkeypatch, tmp_path: Path):
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("run:\n  id: x\n")
+
+    def fake_run(cmd, capture_output, text, check):
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=1,
+            stdout="",
+            stderr="FAIL: partition 'gpu' does not exist\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rc, job_id = submit_via_wrapper(cfg, repo_root=REPO_ROOT)
+    assert rc == 1
     assert job_id is None
-    assert script_path.is_file()
-    assert (tmp_path / "outputs" / "submitted" / "test.yaml").is_file()
 
 
-def test_render_and_submit_unknown_cluster_raises(tmp_path: Path):
-    cfg = _mk_config(["Unbabel/wmt22-cometkiwi-da"])
-    with pytest.raises(ValueError, match="unsupported cluster"):
-        render_and_submit(cfg, cluster="jade2", dry_run=True, repo_root=tmp_path)
+def test_submit_via_wrapper_forwards_sbatch_args(monkeypatch, tmp_path: Path):
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("run:\n  id: x\n")
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd, capture_output, text, check):
+        captured["cmd"] = list(cmd)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="Submitted batch job 42\n", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    submit_via_wrapper(
+        cfg,
+        sbatch_args=["-p", "rtx_a6000_risk", "--gres=gpu:1", "--time=02:00:00"],
+        repo_root=REPO_ROOT,
+    )
+    cmd = captured["cmd"]
+    assert "-p" in cmd and "rtx_a6000_risk" in cmd
+    assert "--gres=gpu:1" in cmd and "--time=02:00:00" in cmd
+
+
+def test_submit_via_wrapper_dry_run_passes_flag(monkeypatch, tmp_path: Path):
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("run:\n  id: x\n")
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd, capture_output, text, check):
+        captured["cmd"] = list(cmd)
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="dry-run mode: pre-flight OK\n", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rc, job_id = submit_via_wrapper(cfg, dry_run=True, repo_root=REPO_ROOT)
+    assert "--dry-run" in captured["cmd"]
+    assert rc == 0
+    assert job_id is None  # dry-run doesn't print "Submitted batch job"
+
+
+def test_submit_via_wrapper_raises_on_missing_config(tmp_path: Path):
+    with pytest.raises(FileNotFoundError, match="config not found"):
+        submit_via_wrapper(tmp_path / "nope.yaml", repo_root=REPO_ROOT)
+
+
+# ---------------------------------------------------------------------------
+# Shell script content checks — AISURREY safety settings are baked in
+# ---------------------------------------------------------------------------
+
+def test_submit_sh_is_syntactically_valid():
+    script = resolve_submit_script(REPO_ROOT)
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    result = subprocess.run([bash, "-n", str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_run_mt_metrix_slurm_is_syntactically_valid():
+    script = resolve_run_slurm_script(REPO_ROOT)
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    result = subprocess.run([bash, "-n", str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_run_slurm_excludes_flaky_node_via_wrapper_default():
+    # The slurm template itself does NOT hardcode --exclude=aisurrey26;
+    # submit.sh adds it every submission. Verify the wrapper does so.
+    script_txt = resolve_submit_script(REPO_ROOT).read_text()
+    assert FLAKY_NODE in script_txt
+    assert "--exclude=" in script_txt
+
+
+def test_run_slurm_has_hf_cache_redirect():
+    txt = resolve_run_slurm_script(REPO_ROOT).read_text()
+    # HF_HOME / TRANSFORMERS_CACHE / HF_DATASETS_CACHE must be exported in
+    # the sbatch header, not only in .bashrc (aisurrey-deploy.md rule #4).
+    assert "HF_HOME=" in txt
+    assert "TRANSFORMERS_CACHE=" in txt
+    assert "HF_DATASETS_CACHE=" in txt
+
+
+def test_run_slurm_has_a100_default_partition():
+    txt = resolve_run_slurm_script(REPO_ROOT).read_text()
+    # Default must be a real partition, not "gpu" (aisurrey-deploy.md rule #1)
+    assert "#SBATCH --partition=a100" in txt
+    assert "--partition=gpu" not in txt
+
+
+def test_run_slurm_activates_mt_metrix_env():
+    txt = resolve_run_slurm_script(REPO_ROOT).read_text()
+    assert "conda activate mt-metrix" in txt
+
+
+def test_submit_sh_rejects_partition_gpu_literal():
+    txt = resolve_submit_script(REPO_ROOT).read_text()
+    # submit.sh must catch the `-p gpu` typo explicitly.
+    assert 'PARTITION" == "gpu"' in txt
+    assert "no 'gpu' partition on AISURREY" in txt.lower() or \
+           "no 'gpu' partition" in txt
+
+
+def test_submit_sh_does_sbatch_test_only():
+    txt = resolve_submit_script(REPO_ROOT).read_text()
+    assert "sbatch --test-only" in txt
+
+
+def test_submit_sh_warns_above_four_gpus():
+    txt = resolve_submit_script(REPO_ROOT).read_text()
+    assert "soft cap" in txt.lower() or "4-GPU" in txt or "4 GPUs" in txt

@@ -1,29 +1,48 @@
 #!/usr/bin/env bash
-# Convenience wrapper: submit all four Surrey domain full-matrix runs as
-# separate sbatch jobs on AISURREY.
+# submit_aisurrey.sh — submit the four Surrey full-matrix runs in one go.
 #
-# Run from the repo root on the login node, with the conda env activated.
+# Thin loop over scripts/submit.sh (the pre-flight-checked submit path).
+# Call from the repo root on aisurrey-submit01 with the conda env active.
+#
+# Usage:
+#   scripts/submit_aisurrey.sh                         # all four domains
+#   scripts/submit_aisurrey.sh legal general           # just these two
+#   scripts/submit_aisurrey.sh legal -p rtx_a6000_risk # override partition
 
 set -euo pipefail
 
-if ! command -v mt-metrix >/dev/null; then
-    echo "ERROR: mt-metrix not on PATH. Did you 'conda activate mt-metrix'?" >&2
-    exit 1
-fi
+SUBMIT="scripts/submit.sh"
+[[ -x "$SUBMIT" ]] || { echo "ERROR: $SUBMIT not executable (run from repo root)" >&2; exit 1; }
 
-DOMAINS=("${@:-legal general tourism health}")
+# Split args into domains (positional until the first '-' arg) and sbatch overrides
+DOMAINS=()
+OVERRIDES=()
+for arg in "$@"; do
+    if [[ "$arg" == -* ]] || [[ ${#OVERRIDES[@]} -gt 0 ]]; then
+        OVERRIDES+=("$arg")
+    else
+        DOMAINS+=("$arg")
+    fi
+done
+[[ ${#DOMAINS[@]} -eq 0 ]] && DOMAINS=(legal general tourism health)
 
-for domain in $DOMAINS; do
+for domain in "${DOMAINS[@]}"; do
     config="configs/runs/surrey_${domain}_full_matrix.yaml"
-    if [ ! -f "$config" ]; then
+    if [[ ! -f "$config" ]]; then
         echo "WARN: skipping $domain — $config not found" >&2
         continue
     fi
-    echo "----------------------------------------------------------------"
+    echo "=============================================================="
     echo "Submitting $config"
-    mt-metrix submit --config "$config"
+    echo "=============================================================="
+    "$SUBMIT" "$config" "${OVERRIDES[@]:-}"
+    echo
 done
 
-echo
-echo "All jobs submitted. Monitor with: squeue -u \$USER"
-echo "Cancel a job with:               scancel <jobid>"
+cat <<'EOF'
+
+All jobs submitted (pre-flight-checked). Monitor with:
+  squeue -u $USER
+Cancel with:
+  scancel <jobid>
+EOF

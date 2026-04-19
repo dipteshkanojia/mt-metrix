@@ -41,26 +41,54 @@ Override with `--output-root <path>`.
 
 ## Cluster deployment (AISURREY)
 
-Don't improvise cluster ops — read these first:
-- `~/Documents/Claude/agent-context/aisurrey-cluster.md` — filesystem topology
-  (/vol/research login-only, /mnt/fast/nobackup scratch compute-visible), torch
-  2.4.1+cu121 pin, HF cache redirect, a100 partition, aisurrey26 is flaky (use
-  `--exclude=aisurrey26`).
-- `docs/AISURREY.md` in this repo — mt-metrix-specific conventions (scratch
-  paths, model cache layout, SLURM template variants by model size).
+Don't improvise cluster ops — read these first, in order:
+- `docs/SESSION_HANDOFF.md` — fast onboarding for a fresh session.
+- `docs/AISURREY.md` — mt-metrix-specific runbook.
+- `~/Documents/Claude/agent-context/aisurrey-cluster.md` — cluster
+  topology, partition specs, reliability history.
+- `~/Documents/Claude/agent-context/aisurrey-deploy.md` — the five
+  pre-flight checks every submission runs through.
+
+**Canonical submit path: `scripts/submit.sh` — no exceptions.** It runs
+five pre-flight checks (partition sanity, conda env present, no
+duplicate job, `sbatch --test-only` validation) and adds
+`--exclude=aisurrey26` automatically. Direct `sbatch` invocation is
+deprecated.
+
+```
+scripts/submit.sh configs/runs/surrey_legal_cometkiwi.yaml
+scripts/submit.sh configs/runs/example_quick.yaml -p 3090 --gres=gpu:1
+scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml --dry-run
+```
+
+One-time cluster setup is `scripts/setup_cluster.sh` — idempotent,
+clones the repo, creates the env, installs torch 2.4.1+cu121, runs the
+smoke tests.
 
 Scratch layout on AISURREY:
 ```
-/mnt/fast/nobackup/scratch4weeks/dk0023/mt-metrix/
-  models/     # HF cache for model weights (COMET + Tower)
-  hf-cache/   # HF hub cache (HF_HOME)
-  outputs/    # run outputs
+/mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/
+  repo/       # this repo (cloned by setup_cluster.sh)
+  models/     # pre-downloaded HF weights (optional)
+  hf_cache/   # HF_HOME (datasets + on-the-fly downloads)
+  outputs/    # run outputs (--output-root)
 ```
 
-Gated-model gotcha: COMET models (`wmt22-cometkiwi-da`, `XCOMET-*`,
-`cometkiwi-da-xl/xxl`) are gated on HuggingFace. Accept the licence on the web UI
-for each one, put your token in `~/.hf_token`, and ensure SLURM jobs export
-`HF_TOKEN=$(cat ~/.hf_token)`.
+Gotchas (do not improvise around these):
+- **No `gpu` partition on AISURREY.** Default is `a100`; cheaper
+  alternatives are `rtx_a6000_risk` / `l40s_risk` / `rtx8000` (48 GB),
+  `3090` / `3090_risk` (24 GB), `2080ti` (11 GB), `debug` (4h cap).
+- **`aisurrey26` is flaky** (silent `1:0` exits, 2026-04); the wrapper
+  always excludes it.
+- **Conda env is `mt-metrix`.** Match the case from `conda env list`.
+- **torch pin: `torch==2.4.1+cu121`.** Newer/older builds cause silent
+  NCCL mismatches.
+- **HF cache** must be redirected to scratch via `HF_HOME`,
+  `TRANSFORMERS_CACHE`, `HF_DATASETS_CACHE` in the sbatch header (not
+  only in `.bashrc`); `scripts/run_mt_metrix.slurm` does this.
+- **Gated models** (`wmt22-cometkiwi-da`, `XCOMET-*`, all Tower) need
+  licence acceptance on the HF web UI for the account whose token sits
+  in `~/.hf_token`.
 
 ## Key design rules
 1. **Plugin scorers** — every metric family is a plugin behind `Scorer`. No

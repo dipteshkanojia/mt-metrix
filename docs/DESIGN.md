@@ -319,35 +319,52 @@ mt-metrix score --config <path>
 
 mt-metrix list-models [--family comet|tower|sacrebleu]
 mt-metrix list-datasets
-mt-metrix download --family comet --to /mnt/fast/nobackup/scratch4weeks/dk0023/mt-metrix/models
-mt-metrix submit --config <path> --cluster aisurrey
+mt-metrix download --family comet --to /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/models
+mt-metrix submit --config <path>
                  [--partition a100] [--gpus 1] [--time 04:00:00]
+                 [--dry-run]
 mt-metrix correlate --run <run_id>     # re-compute correlations from segments.tsv
 ```
 
+`mt-metrix submit` is a thin Python wrapper around `scripts/submit.sh`,
+which is the canonical path on AISURREY. For interactive cluster use,
+prefer the shell script directly.
+
 ## 10. SLURM submission (AISURREY)
 
-`mt-metrix submit` generates an `sbatch` script from
-`scripts/slurm_templates/` based on the scorer(s) in the run config. Size
-heuristics:
+**The only supported submit path is `scripts/submit.sh`.** It runs five
+pre-flight checks (partition exists and is not the nonexistent `gpu`;
+conda env `mt-metrix` present; no duplicate in queue; `sbatch --test-only`
+accepts the plan) and submits with `--exclude=aisurrey26`. Direct
+`sbatch` invocation is deprecated.
 
-| Scorer | Template | GPUs | Time | Partition |
-|--------|----------|------|------|-----------|
-| cometinho-da, wmt*-comet-da, wmt22-cometkiwi-da | `comet_small.sbatch` | 1 | 01:00:00 | a100 |
-| cometkiwi-da-xl, XCOMET-XL | `comet_xl.sbatch` | 1 | 02:00:00 | a100 |
-| cometkiwi-da-xxl, XCOMET-XXL | `comet_xxl.sbatch` | 1 | 04:00:00 | a100 |
-| Tower 7B | `tower_7b.sbatch` | 1 | 02:00:00 | a100 |
-| Tower 13B / Tower-Plus-9B | `tower_13b.sbatch` | 2 | 04:00:00 | a100 |
-| Tower-Plus-72B | `tower_72b.sbatch` | 4 | 08:00:00 | a100 |
+The parameterised sbatch template lives at `scripts/run_mt_metrix.slurm`:
 
-All templates:
+- Default `--partition=a100 --gres=gpu:1 --cpus-per-task=8 --mem=64G
+  --time=24:00:00`. Override on the CLI:
+  `scripts/submit.sh <cfg> -p rtx_a6000_risk --gres=gpu:1 --time=02:00:00`.
+- Exports `HF_HOME`, `TRANSFORMERS_CACHE`, `HF_DATASETS_CACHE` to
+  `$SCRATCH/hf_cache/...`, and `COMET_CACHE` to `$SCRATCH/models/comet`.
+- Sources `~/.hf_token` into `HF_TOKEN` if present (gated models).
+- Activates the `mt-metrix` conda env.
+- Runs `mt-metrix score --config $CONFIG --output-root $SCRATCH/outputs`.
 
-- Activate the conda env `mt-metrix` (see `docs/AISURREY.md` for creation).
-- Export `HF_HOME=$SCRATCH/hf-cache`, `HF_TOKEN=$(cat ~/.hf_token)`.
-- Export `COMET_CACHE=$SCRATCH/models/comet`.
-- `--exclude=aisurrey26` (flaky node).
-- `--nodes=1`, `--ntasks=1`, `--cpus-per-task=8`.
-- Pin torch stack: load the pre-built env, don't rebuild inside the job.
+One-time cluster setup is `scripts/setup_cluster.sh` — idempotent; clones
+the repo, creates the env with `torch==2.4.1+cu121`, installs
+`[comet,tower]` extras, runs the smoke tests.
+
+**Right-sizing.** COMET-base / CometKiwi-DA / BLEU all fit on 24 GB.
+CometKiwi-XL needs 40–48 GB. Tower-7B (vLLM) fits on 24 GB; Tower-13B on
+2× 48 GB or 1× A100. Only Tower-72B and COMET-XXL actually need A100.
+Check `outputs/<run_id>/summary.json::peak_gpu_memory_gb` after a first
+run and move to the cheapest partition that fits:
+
+| Peak memory | Partition                                            |
+|-------------|------------------------------------------------------|
+| ≤ 10 GB     | `2080ti`                                             |
+| ≤ 22 GB     | `3090` / `3090_risk`                                 |
+| ≤ 44 GB     | `rtx8000` / `rtx_a6000_risk` / `l40s_risk`           |
+| ≤ 76 GB     | `a100`                                               |
 
 ## 11. Testing strategy
 
