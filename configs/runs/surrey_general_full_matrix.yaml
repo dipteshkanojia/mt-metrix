@@ -16,8 +16,8 @@ scorers:
   - ref: comet/xcomet-xl-qe
   - ref: comet/xcomet-xxl-qe
   - ref: comet/wmt20-comet-qe-da
-  - ref: comet/wmt21-comet-qe-da
-  - ref: comet/wmt21-comet-qe-mqm
+  # wmt21-comet-qe-da / wmt21-comet-qe-mqm omitted — Marian checkpoints,
+  # unloadable with modern unbabel-comet (see configs/models/comet.yaml).
 
   - ref: comet/wmt22-comet-da
   - ref: comet/eamt22-cometinho-da

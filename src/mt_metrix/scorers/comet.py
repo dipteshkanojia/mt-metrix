@@ -66,10 +66,13 @@ class CometScorer:
     def load(self) -> None:
         if self._model is not None:
             return
+        from pathlib import Path
+
         from comet import download_model, load_from_checkpoint
 
         log.info("downloading COMET model %s (respecting HF_HOME cache)", self._cfg.model)
         ckpt_path = download_model(self._cfg.model)
+        _raise_if_marian_layout(self._cfg.model, Path(ckpt_path))
         log.info("loading checkpoint from %s", ckpt_path)
         self._model = load_from_checkpoint(ckpt_path)
 
@@ -170,6 +173,36 @@ class CometScorer:
 
 def _is_xcomet(model_id: str | None) -> bool:
     return bool(model_id) and "xcomet" in model_id.lower()
+
+
+class UnsupportedMarianCheckpointError(RuntimeError):
+    """Raised when a COMET model id resolves to a Marian-format checkpoint
+    that modern unbabel-comet cannot load.
+
+    ``download_model()`` hardcodes ``<snapshot>/checkpoints/model.ckpt`` but
+    the three ``-marian`` HF repos ship ``<snapshot>/checkpoints/marian.model.bin``
+    instead, so ``load_from_checkpoint()`` would otherwise raise a confusing
+    ``Invalid checkpoint path`` error. This wrapper swaps in a message that
+    names the real root cause.
+    """
+
+
+def _raise_if_marian_layout(model_id: str, ckpt_path: "Path") -> None:  # noqa: F821 — Path imported at call site
+    """Preflight: if download_model returned a model.ckpt path that doesn't
+    exist but the snapshot holds a marian.model.bin alongside, the repo is a
+    Marian-format checkpoint that modern unbabel-comet can't load."""
+    if ckpt_path.is_file():
+        return
+    marian_sibling = ckpt_path.with_name("marian.model.bin")
+    if not marian_sibling.is_file():
+        return
+    raise UnsupportedMarianCheckpointError(
+        f"COMET model {model_id!r} is a Marian-format checkpoint "
+        f"({marian_sibling}) — modern unbabel-comet only loads "
+        f"pytorch-lightning .ckpt files from <snapshot>/checkpoints/model.ckpt. "
+        f"Remove it from your catalogue / run config, or pin to an older "
+        f"unbabel-comet that still had a Marian loader."
+    )
 
 
 def _infer_needs_reference(model_id: str) -> bool:

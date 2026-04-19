@@ -22,8 +22,8 @@ scorers:
   - ref: comet/wmt23-cometkiwi-da-xl
   - ref: comet/wmt23-cometkiwi-da-xxl
   - ref: comet/wmt20-comet-qe-da
-  - ref: comet/wmt21-comet-qe-da
-  - ref: comet/wmt21-comet-qe-mqm
+  # wmt21-comet-qe-da / wmt21-comet-qe-mqm omitted — Marian checkpoints,
+  # unloadable with modern unbabel-comet (see configs/models/comet.yaml).
   - ref: comet/xcomet-xl-qe
   - ref: comet/xcomet-xxl-qe
 
@@ -31,7 +31,7 @@ scorers:
   - ref: comet/wmt22-comet-da
   - ref: comet/eamt22-cometinho-da
   - ref: comet/wmt20-comet-da
-  - ref: comet/wmt21-comet-da
+  # wmt21-comet-da omitted — same Marian filename mismatch as the QE variants.
   - ref: comet/xcomet-xl
   - ref: comet/xcomet-xxl
 

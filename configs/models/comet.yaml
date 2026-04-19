@@ -48,7 +48,15 @@ models:
   wmt21-comet-da:
     model: Unbabel/wmt21-comet-da-marian
     needs_reference: true
-    notes: "WMT21 DA (Marian port of the original checkpoint)."
+    notes: |
+      WMT21 DA (Marian port of the original checkpoint).
+      BROKEN with modern unbabel-comet (2026-04-20 diagnosis): the HF repo
+      ships weights as `checkpoints/marian.model.bin`, but unbabel-comet's
+      `download_model()` hardcodes `checkpoints/model.ckpt` as the return
+      path, so `load_from_checkpoint()` raises `Invalid checkpoint path`.
+      Applies to ALL three `-marian` checkpoints (this one + the two QE
+      variants below). Do NOT include in full-matrix runs until upstream
+      grows a Marian loader.
     params:
       batch_size: 64
       gpus: 1
@@ -95,7 +103,14 @@ models:
   wmt21-comet-qe-da:
     model: Unbabel/wmt21-comet-qe-da-marian
     needs_reference: false
-    notes: "WMT21 QE (Marian)."
+    notes: |
+      WMT21 QE (Marian). BROKEN — same Marian filename mismatch as
+      `wmt21-comet-da` above: repo has `checkpoints/marian.model.bin`,
+      `download_model()` hardcodes `checkpoints/model.ckpt`. The earlier
+      2026-04-19 run appeared to "load fine" only because Bug B silently
+      skipped it as ref-needing on QE-only datasets — once that resolver
+      bug was fixed, this one started failing loudly with
+      `Invalid checkpoint path`. Do NOT include in full-matrix runs.
     params:
       batch_size: 64
       gpus: 1
@@ -104,15 +119,22 @@ models:
     model: Unbabel/wmt21-comet-qe-mqm-marian
     needs_reference: false
     notes: |
-      WMT21 QE trained on MQM (Marian).
-      KNOWN FLAKY (2026-04-19): full-matrix runs saw "Invalid checkpoint
-      path" from pytorch-lightning load_from_checkpoint for this model
-      specifically while the other Marian variants (wmt21-comet-qe-da-marian,
-      wmt21-comet-da-marian) loaded fine. Most common cause: the HF licence
-      for THIS model was never accepted for the token in ~/.hf_token —
-      Unbabel gates each checkpoint separately. Accept it at
-      https://huggingface.co/Unbabel/wmt21-comet-qe-mqm-marian before
-      adding it to a full-matrix run.
+      WMT21 QE trained on MQM (Marian). BROKEN — same Marian filename
+      mismatch as the other two `-marian` entries above.
+
+      Root cause (2026-04-20): the HF repo is apache-2.0, NOT gated
+      (verified via `hf_hub_query`). The failure is one level down:
+      `snapshot_download` pulls `checkpoints/marian.model.bin` +
+      `.md5` + LICENSE + README, but unbabel-comet's `download_model()`
+      then returns `<snapshot>/checkpoints/model.ckpt` unconditionally
+      (`comet/models/__init__.py`), and `load_from_checkpoint()` raises
+      `Invalid checkpoint path` because that file does not exist.
+
+      This was the only Marian QE that visibly failed in the 2026-04-19
+      full-matrix run because Bug B had silently skipped the other QE
+      Marian (`wmt21-comet-qe-da`) before it could try to load. Now that
+      Bug B is fixed, both would fail identically — both are removed
+      from the full-matrix configs. Do NOT include in full-matrix runs.
     params:
       batch_size: 64
       gpus: 1
