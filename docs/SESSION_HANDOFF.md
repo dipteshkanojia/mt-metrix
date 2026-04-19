@@ -143,8 +143,10 @@ them whenever the cluster surface is in scope.
    weights). `setup_cluster.sh` clones into
    `/mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/repo`.
 
-5. **torch pin: `torch==2.4.1+cu121`.** Newer / older builds cause silent
-   NCCL/SM mismatches. `setup_cluster.sh` installs exactly this.
+5. **torch pin: `torch==2.4.0+cu121`.** vllm 0.6.x, torchvision 0.19.0
+   and xformers 0.0.27.post2 all hard-require torch==2.4.0, so installing
+   2.4.1 first triggers a pip-resolver downgrade mid-install.
+   `setup_cluster.sh` installs 2.4.0 directly to skip the downgrade dance.
 
 6. **HF cache redirect.** `HF_HOME`, `TRANSFORMERS_CACHE`,
    `HF_DATASETS_CACHE` are exported in the sbatch header, not only in

@@ -11,7 +11,7 @@ for the fresh-session briefing. This example is the short version.
 
 ```bash
 ssh aisurrey
-# Clones the repo into scratch, creates conda env with torch 2.4.1+cu121,
+# Clones the repo into scratch, creates conda env with torch 2.4.0+cu121,
 # installs mt-metrix with [comet,tower] extras, runs the smoke tests.
 mkdir -p /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix
 cd /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix

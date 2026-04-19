@@ -35,7 +35,7 @@ as an evaluation suite.
 - YAML config system with model- / dataset- / run-level reuse.
 - CLI: `score`, `list-models`, `list-datasets`, `submit`, `download`.
 - SLURM submission for AISURREY (a100 partition, scratch-aware paths, HF cache
-  redirect, `--exclude=aisurrey26`, torch-2.4.1+cu121 pin).
+  redirect, `--exclude=aisurrey26`, torch-2.4.0+cu121 pin).
 - Configs for all 4 Surrey NLP domain-specific QE datasets (Legal, General,
   Tourism, Health), all COMET variants, all Tower variants.
 
@@ -350,7 +350,7 @@ The parameterised sbatch template lives at `scripts/run_mt_metrix.slurm`:
 - Runs `mt-metrix score --config $CONFIG --output-root $SCRATCH/outputs`.
 
 One-time cluster setup is `scripts/setup_cluster.sh` — idempotent; clones
-the repo, creates the env with `torch==2.4.1+cu121`, installs
+the repo, creates the env with `torch==2.4.0+cu121`, installs
 `[comet,tower]` extras, runs the smoke tests.
 
 **Right-sizing.** COMET-base / CometKiwi-DA / BLEU all fit on 24 GB.

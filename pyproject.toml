@@ -41,12 +41,14 @@ comet = [
 # Tower family: LLM-prompted scoring via GEMBA-DA / GEMBA-MQM.
 # vLLM is the preferred inference backend. Pin kept tight so pip can't pull
 # a bleeding-edge vllm that requires torch 2.5+ as a BUILD dep (would trigger
-# multi-GB downloads on top of the cluster's torch 2.4.1+cu121 pin). vllm 0.6.x
-# is the last line that builds against torch 2.4.
+# multi-GB downloads on top of the cluster's torch 2.4.0+cu121 pin). vllm 0.6.x
+# hard-pins torch==2.4.0 (along with torchvision 0.19.0 and xformers
+# 0.0.27.post2), so we match that exactly rather than letting the resolver
+# downgrade from 2.4.1.
 tower = [
     "vllm>=0.5.0,<0.7",
     "transformers>=4.40",
-    "torch>=2.4,<2.5",
+    "torch==2.4.0",
     "accelerate>=0.30",
 ]
 # Small-model local smoke tests (CPU / Mac MPS) — transformers fallback.

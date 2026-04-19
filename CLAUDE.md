@@ -62,7 +62,7 @@ scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml --dry-run
 ```
 
 One-time cluster setup is `scripts/setup_cluster.sh` — idempotent,
-clones the repo, creates the env, installs torch 2.4.1+cu121, runs the
+clones the repo, creates the env, installs torch 2.4.0+cu121, runs the
 smoke tests.
 
 Scratch layout on AISURREY:
@@ -81,8 +81,9 @@ Gotchas (do not improvise around these):
 - **`aisurrey26` is flaky** (silent `1:0` exits, 2026-04); the wrapper
   always excludes it.
 - **Conda env is a prefix path on scratch** (`$SCRATCH/conda_env`), not a named env. Activate with `conda activate /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/conda_env`. The user volume can't hold torch + vllm + comet deps.
-- **torch pin: `torch==2.4.1+cu121`.** Newer/older builds cause silent
-  NCCL mismatches.
+- **torch pin: `torch==2.4.0+cu121`.** vllm 0.6.x, torchvision 0.19.0
+  and xformers 0.0.27.post2 all hard-pin torch==2.4.0, so 2.4.1 triggers
+  a noisy downgrade during install. Match vllm's expectation directly.
 - **HF cache** must be redirected to scratch via `HF_HOME`,
   `TRANSFORMERS_CACHE`, `HF_DATASETS_CACHE` in the sbatch header (not
   only in `.bashrc`); `scripts/run_mt_metrix.slurm` does this.

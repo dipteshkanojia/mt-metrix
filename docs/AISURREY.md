@@ -34,8 +34,9 @@ From `aisurrey-cluster.md` / `aisurrey-deploy.md`:
   All compute-visible work lives under
   `/mnt/fast/nobackup/scratch4weeks/$USER/` or
   `/mnt/fast/nobackup/users/$USER/`.
-- **torch pin:** `torch==2.4.1+cu121`. Newer / older builds cause
-  silent NCCL/SM mismatches.
+- **torch pin:** `torch==2.4.0+cu121`. vllm 0.6.x, torchvision 0.19.0
+  and xformers 0.0.27.post2 all hard-pin torch==2.4.0; 2.4.1 triggers a
+  pip-resolver downgrade mid-install.
 - **Conda env name is `mt-metrix`** (check casing with `conda env list`).
 - **HF cache** redirected in the sbatch header, not only in `.bashrc`.
 
@@ -46,7 +47,7 @@ It will:
 
 1. Create `/mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/{models,hf_cache,outputs}`.
 2. Clone the repo to `$SCRATCH/mt-metrix/repo` (or `git pull` if it exists).
-3. Create the `mt-metrix` conda env with Python 3.10 and `torch==2.4.1+cu121`.
+3. Create the `mt-metrix` conda env with Python 3.10 and `torch==2.4.0+cu121`.
 4. `pip install -e ".[comet,tower]"`.
 5. Warn if `~/.hf_token` is missing (needed for gated COMET / Tower models).
 6. Run the fast pytest suite as a smoke test.

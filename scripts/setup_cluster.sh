@@ -6,7 +6,7 @@
 #
 # What it does:
 #   1. Clone / update the repo under /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix.
-#   2. Create / update the `mt-metrix` conda env (python 3.10, torch 2.4.1+cu121).
+#   2. Create / update the `mt-metrix` conda env (python 3.10, torch 2.4.0+cu121).
 #   3. Install mt-metrix with [comet,tower] extras.
 #   4. Create scratch layout (models/, hf_cache/, outputs/).
 #   5. Check for ~/.hf_token and warn if missing.
@@ -25,12 +25,17 @@ REPO_URL="${REPO_URL:-https://github.com/dipteshkanojia/mt-metrix.git}"  # overr
 SCRATCH="${SCRATCH:-/mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix}"
 WORKDIR="$SCRATCH/repo"
 # Conda env lives on scratch as a prefix path, NOT in /mnt/fast/nobackup/users/$USER
-# (which has a small quota). mt-metrix + torch 2.4.1 + vllm + comet deps = ~10 GB;
+# (which has a small quota). mt-metrix + torch 2.4.0 + vllm + comet deps = ~10 GB;
 # the user volume fills up fast. Scratch is purged every 4 weeks, but re-running
 # this script recreates the env idempotently, so that's fine.
 CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-$SCRATCH/conda_env}"
 PYTHON_VER="3.10"
-TORCH_PIN="torch==2.4.1 --index-url https://download.pytorch.org/whl/cu121"
+# torch 2.4.0 (not 2.4.1): vllm 0.6.x, torchvision 0.19.0, and xformers
+# 0.0.27.post2 all hard-require torch==2.4.0. Installing 2.4.1 first means
+# the mt-metrix install then downgrades torch, which trips pip's resolver
+# warnings and wastes a ~1 GB wheel. Match what vllm expects and skip the
+# dance. cu121 is still right for the cluster driver (CUDA 12.06).
+TORCH_PIN="torch==2.4.0 --index-url https://download.pytorch.org/whl/cu121"
 
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 yel()   { printf '\033[33m%s\033[0m\n' "$*" >&2; }
@@ -92,9 +97,16 @@ fi
 # Use the env's pip explicitly so we never accidentally pip into base.
 PIP="$CONDA_ENV_PREFIX/bin/pip"
 
-# torch pin first — cluster driver is CUDA 12.06; 2.4.1+cu121 is the known-good build
-echo "  installing torch (2.4.1+cu121)..."
+# torch pin first — cluster driver is CUDA 12.06; 2.4.0+cu121 is the build
+# that vllm 0.6.x, torchvision 0.19.0 and xformers 0.0.27.post2 are pinned to.
+echo "  installing torch (2.4.0+cu121)..."
 "$PIP" install --progress-bar off $TORCH_PIN
+
+# unbabel-comet imports `pkg_resources` (from setuptools) at module load time.
+# Modern conda envs with python 3.10 don't always ship setuptools by default,
+# so install it explicitly before the mt-metrix install triggers comet import.
+echo "  installing setuptools (pkg_resources) for unbabel-comet..."
+"$PIP" install --progress-bar off setuptools
 
 # [dev] brings pytest in so the smoke test below can run.
 echo "  installing mt-metrix with [comet,tower,dev] extras..."
@@ -141,7 +153,10 @@ if [ ! -x "$PYTEST" ]; then
     red "  Re-run: '$PIP' install -e \".[comet,tower,dev]\""
     exit 1
 fi
-if ! "$PYTEST" tests/ -q --no-header 2>&1 | tail -5; then
+# --tb=short + no tail pipe: we want the FULL failure list + tracebacks if
+# something breaks, not a 5-line hint. When the suite is green the output is
+# just a dot progress bar + summary.
+if ! "$PYTEST" tests/ -q --no-header --tb=short; then
     red "  pytest failed — investigate before submitting jobs"
     exit 1
 fi
