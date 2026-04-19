@@ -83,6 +83,15 @@ export COMET_CACHE="$SCRATCH/models/comet"
 export TMPDIR="$SCRATCH/tmp"
 export PIP_CACHE_DIR="$SCRATCH/pip_cache"
 
+# --- Ray (used by vLLM for tensor-parallel on Tower-13B+) needs its session
+# --- dir on a SHORT path because Linux caps AF_UNIX socket paths at 107 bytes
+# --- and Ray builds .../ray/session_<timestamp>/sockets/plasma_store inside
+# --- whatever TMPDIR points at. $SCRATCH/tmp/... is ~113 bytes by the time
+# --- Ray is done, so we point Ray specifically at a short /tmp path. This
+# --- only holds small control sockets, not object store data.
+export RAY_TMPDIR="/tmp/ray_${USER:-dk0023}"
+mkdir -p "$RAY_TMPDIR"
+
 # --- HF auth for gated COMET / Tower models ---
 if [ -f "$HOME/.hf_token" ]; then
     export HF_TOKEN="$(cat "$HOME/.hf_token")"

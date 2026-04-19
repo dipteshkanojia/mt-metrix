@@ -173,15 +173,22 @@ def _is_xcomet(model_id: str | None) -> bool:
 
 
 def _infer_needs_reference(model_id: str) -> bool:
-    """Heuristic: Kiwi variants are QE (no ref); DA variants take a ref.
+    """Heuristic: Kiwi variants are QE (no ref); ``-qe-`` / trailing ``-qe``
+    marks a QE variant; everything else is reference-based.
 
     XCOMET accepts both — treated as reference-using by default; set
-    ``needs_reference: false`` in the config to run in QE mode.
+    ``needs_reference: false`` in the catalogue entry to run in QE mode.
+
+    The catalogue should be authoritative — this heuristic is only the
+    fallback when a scorer is constructed without a ``needs_reference``
+    param. It used to buggily split on the bare token ``qe`` and then look
+    for ``da`` in the suffix, which flipped ``-qe-da`` and ``-qe-mqm-marian``
+    to the wrong class.
     """
     lower = model_id.lower()
     if "kiwi" in lower:
         return False
-    if "qe" in lower and "da" not in lower.split("qe")[1]:
+    if "-qe-" in lower or lower.endswith("-qe"):
         return False
     return True
 

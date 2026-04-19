@@ -190,6 +190,22 @@ def test_run_slurm_activates_scratch_prefix_env():
     assert 'conda activate "$SCRATCH/conda_env"' in txt
 
 
+def test_run_slurm_sets_short_ray_tmpdir():
+    """vLLM launches Ray for 13B+ tensor-parallel. Ray builds an AF_UNIX
+    socket path under whatever TMPDIR points at, and Linux caps those at
+    107 bytes. With TMPDIR=$SCRATCH/tmp (44 chars already) the resulting
+    session socket overflows and Tower-13B/9B/72B/9B-mqm all crash with
+    ``validate_socket_filename failed`` before a single token is generated.
+    The slurm template must override RAY_TMPDIR onto /tmp before the run.
+    """
+    txt = resolve_run_slurm_script(REPO_ROOT).read_text()
+    assert "RAY_TMPDIR=" in txt
+    assert "/tmp/ray_" in txt, (
+        "RAY_TMPDIR must live under /tmp (short path) to keep the Ray "
+        "session socket under the AF_UNIX 107-byte limit"
+    )
+
+
 def test_submit_sh_rejects_partition_gpu_literal():
     txt = resolve_submit_script(REPO_ROOT).read_text()
     # submit.sh must catch the `-p gpu` typo explicitly.

@@ -81,6 +81,14 @@ models:
       temperature: 0.0
       max_tokens: 50
       tensor_parallel_size: 1
+      # Mistral's HF config advertises sliding_window + a large
+      # max_position_embeddings. vLLM 0.6.x disables FlashAttention-2 (sliding
+      # window) and falls through a code path that multiplies max_position_
+      # embeddings by something that can be None, raising:
+      #   TypeError: unsupported operand type(s) for *: 'int' and 'NoneType'
+      # Pinning max_model_len tells vLLM not to infer from the HF config and
+      # sidesteps the bug. 8192 covers GEMBA-DA prompts with plenty of margin.
+      max_model_len: 8192
 
   towerinstruct-wmt24-chat-7b:
     model: Unbabel/TowerInstruct-WMT24-Chat-7B

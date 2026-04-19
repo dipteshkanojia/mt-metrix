@@ -141,6 +141,79 @@ def test_load_run_config_cli_overrides(project_root: Path, tmp_path: Path):
     assert cfg.run_id == "ci-run"
 
 
+def test_catalogue_top_level_needs_reference_propagates_into_params(
+    project_root: Path, tmp_path: Path
+):
+    """Catalogue entries declare ``needs_reference`` at the top level (not
+    under ``params:``). The resolver must surface that into ``ScorerConfig.
+    params`` so scorers picking it up via ``cfg.params.get("needs_reference")``
+    see the correct flag. Without this, all COMET-QE variants whose names
+    contain ``-qe-`` used to fall through to a buggy heuristic and end up
+    marked as needing references — the 2026-04-19 full-matrix regression.
+    """
+    # wmt20-comet-qe-da has needs_reference: false at the top level
+    cfg_path = tmp_path / "run.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "dataset": {
+                    "kind": "local",
+                    "path": str(project_root / "tests/fixtures/tiny_with_ref.tsv"),
+                },
+                "scorers": [{"ref": "comet/wmt20-comet-qe-da"}],
+            }
+        )
+    )
+    cfg = load_run_config(cfg_path, catalogue_roots=[project_root])
+    assert cfg.scorers[0].params.get("needs_reference") is False, (
+        "top-level needs_reference: false in catalogue must propagate to params"
+    )
+
+    # wmt22-comet-da has needs_reference: true at the top level — also covered
+    cfg_path2 = tmp_path / "run2.yaml"
+    cfg_path2.write_text(
+        yaml.safe_dump(
+            {
+                "dataset": {
+                    "kind": "local",
+                    "path": str(project_root / "tests/fixtures/tiny_with_ref.tsv"),
+                },
+                "scorers": [{"ref": "comet/wmt22-comet-da"}],
+            }
+        )
+    )
+    cfg2 = load_run_config(cfg_path2, catalogue_roots=[project_root])
+    assert cfg2.scorers[0].params.get("needs_reference") is True
+
+
+def test_scorer_overrides_win_over_catalogue_top_level_flag(
+    project_root: Path, tmp_path: Path
+):
+    """If a run config explicitly sets ``needs_reference`` via ``overrides``,
+    that must beat the catalogue's top-level value — lets users run e.g.
+    XCOMET-XL in a non-default mode from a single run file.
+    """
+    cfg_path = tmp_path / "run.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "dataset": {
+                    "kind": "local",
+                    "path": str(project_root / "tests/fixtures/tiny_with_ref.tsv"),
+                },
+                "scorers": [
+                    {
+                        "ref": "comet/wmt22-comet-da",  # catalogue says needs_reference: true
+                        "overrides": {"needs_reference": False},
+                    }
+                ],
+            }
+        )
+    )
+    cfg = load_run_config(cfg_path, catalogue_roots=[project_root])
+    assert cfg.scorers[0].params.get("needs_reference") is False
+
+
 def test_coerce_types():
     assert _coerce("true") is True
     assert _coerce("no") is False

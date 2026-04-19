@@ -186,6 +186,15 @@ def _resolve_scorer_entry(
         # merge overrides into params
         overrides = entry.get("overrides") or {}
         params = {**(base.get("params") or {}), **overrides}
+        # Promote catalogue top-level flags that scorers read from params. Without
+        # this, a catalogue entry like `needs_reference: false` at the entry's
+        # top level (the documented schema) would be silently dropped, and COMET
+        # scorers would fall back to the model-id heuristic — which
+        # misclassified `Unbabel/XCOMET-XL` (QE mode) and `wmt20-comet-qe-da`
+        # during the 2026-04-19 full-matrix run.
+        for flag in ("needs_reference",):
+            if flag in base and flag not in overrides:
+                params.setdefault(flag, base[flag])
         return ScorerConfig(
             family=base["family"],
             name=base["name"],

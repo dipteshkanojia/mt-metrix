@@ -103,7 +103,16 @@ models:
   wmt21-comet-qe-mqm:
     model: Unbabel/wmt21-comet-qe-mqm-marian
     needs_reference: false
-    notes: "WMT21 QE trained on MQM (Marian)."
+    notes: |
+      WMT21 QE trained on MQM (Marian).
+      KNOWN FLAKY (2026-04-19): full-matrix runs saw "Invalid checkpoint
+      path" from pytorch-lightning load_from_checkpoint for this model
+      specifically while the other Marian variants (wmt21-comet-qe-da-marian,
+      wmt21-comet-da-marian) loaded fine. Most common cause: the HF licence
+      for THIS model was never accepted for the token in ~/.hf_token —
+      Unbabel gates each checkpoint separately. Accept it at
+      https://huggingface.co/Unbabel/wmt21-comet-qe-mqm-marian before
+      adding it to a full-matrix run.
     params:
       batch_size: 64
       gpus: 1
