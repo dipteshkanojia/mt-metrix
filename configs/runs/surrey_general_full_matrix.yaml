@@ -1,0 +1,45 @@
+# Surrey General-QE — full COMET × Tower × sacrebleu matrix.
+# Siblings: surrey_{legal,tourism,health}_full_matrix.yaml.
+#
+# General-QE covers 5 language pairs: en-gu, en-hi, en-mr, en-ta, en-te.
+# Per-lang-pair breakdowns land in summary.json under `by_lang_pair`.
+
+run:
+  id: surrey_general_full_matrix
+
+dataset: !include ../datasets/surrey_general.yaml
+
+scorers:
+  - ref: comet/wmt22-cometkiwi-da
+  - ref: comet/wmt23-cometkiwi-da-xl
+  - ref: comet/wmt23-cometkiwi-da-xxl
+  - ref: comet/xcomet-xl-qe
+  - ref: comet/xcomet-xxl-qe
+  - ref: comet/wmt20-comet-qe-da
+  - ref: comet/wmt21-comet-qe-da
+  - ref: comet/wmt21-comet-qe-mqm
+
+  - ref: comet/wmt22-comet-da
+  - ref: comet/eamt22-cometinho-da
+  - ref: comet/xcomet-xl
+  - ref: comet/xcomet-xxl
+
+  - ref: tower/tower-plus-2b
+  - ref: tower/towerinstruct-7b-v0.2
+  - ref: tower/towerinstruct-mistral-7b-v0.2
+  - ref: tower/towerinstruct-wmt24-chat-7b
+  - ref: tower/towerinstruct-13b-v0.1
+  - ref: tower/tower-plus-9b
+  - ref: tower/tower-plus-72b
+
+  - ref: tower/towerinstruct-7b-v0.2-mqm
+  - ref: tower/tower-plus-9b-mqm
+
+  - ref: sacrebleu/bleu
+  - ref: sacrebleu/chrf
+  - ref: sacrebleu/chrf++
+  - ref: sacrebleu/ter
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]

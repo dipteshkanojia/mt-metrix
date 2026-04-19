@@ -1,0 +1,45 @@
+# Surrey Legal-QE × every Tower variant (GEMBA-DA + GEMBA-MQM + native).
+#
+# Runs the full Tower family with the three prompt modes: gemba-da (single
+# 0-100 score), gemba-mqm (severity-weighted errors), tower-native (chat-
+# template framing). Each variant is a separate scorer so extras (raw
+# response, parse_ok, error list for MQM) land in segments.jsonl.
+#
+# Notes:
+#   - All Tower models are CC-BY-NC-4.0 — research use only.
+#   - vLLM is the default backend; switch per-variant via overrides if needed.
+#   - 72B variants need 4× A100 80GB. 13B / 9B need 2 GPUs.
+#   - Expected wall-clock: several hours end-to-end on an A100 node.
+#   - For a focused subset, copy this file and delete the entries you don't
+#     want rather than editing in-place.
+
+run:
+  id: surrey_legal_all_tower
+
+dataset: !include ../datasets/surrey_legal.yaml
+
+scorers:
+  # --- GEMBA-DA (single 0-100 float) --------------------------------------
+  - ref: tower/tower-plus-2b                      # fast smoke test (1 GPU)
+  - ref: tower/towerinstruct-7b-v0.1
+  - ref: tower/towerinstruct-7b-v0.2
+  - ref: tower/towerinstruct-mistral-7b-v0.2
+  - ref: tower/towerinstruct-wmt24-chat-7b
+  - ref: tower/towerinstruct-13b-v0.1
+  - ref: tower/tower-plus-9b
+  - ref: tower/towerbase-7b-v0.1
+  - ref: tower/towerbase-13b-v0.1
+  - ref: tower/tower-plus-72b                     # 4× A100 80GB
+
+  # --- GEMBA-MQM (severity-weighted; richer extras) ----------------------
+  - ref: tower/towerinstruct-7b-v0.2-mqm
+  - ref: tower/towerinstruct-13b-v0.1-mqm
+  - ref: tower/tower-plus-9b-mqm
+  - ref: tower/tower-plus-72b-mqm
+
+  # --- Tower-native chat-template framing --------------------------------
+  - ref: tower/towerinstruct-7b-v0.2-native
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]

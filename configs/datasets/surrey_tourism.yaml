@@ -1,0 +1,14 @@
+# surrey-nlp/Tourism-QE — domain-specific QE for Indic tourism-domain translations.
+# Lang pairs: en-hi, en-mr, en-te.
+# https://hf.co/datasets/surrey-nlp/Tourism-QE
+
+kind: huggingface
+repo: surrey-nlp/Tourism-QE
+split: test
+domain: tourism
+columns:
+  source: source_text
+  target: target_text
+  gold: z_mean
+  lang_pair: "@from:language_pair"
+  domain: "@constant:tourism"

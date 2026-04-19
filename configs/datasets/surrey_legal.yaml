@@ -1,0 +1,15 @@
+# surrey-nlp/Legal-QE — domain-specific QE for Indic legal translations.
+# Lang pairs: en-gu, en-ta, en-te. Licence: AFL-3.0.
+# https://hf.co/datasets/surrey-nlp/Legal-QE
+
+kind: huggingface
+repo: surrey-nlp/Legal-QE
+# config: en-gujarati     # pick a subset; leave unset for the default config
+split: test
+domain: legal
+columns:
+  source: source_text
+  target: target_text
+  gold: z_mean
+  lang_pair: "@from:language_pair"
+  domain: "@constant:legal"

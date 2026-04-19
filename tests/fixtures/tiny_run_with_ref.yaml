@@ -1,0 +1,28 @@
+# Minimal run config used by the test-suite. Local TSV + sacrebleu only so
+# there's no network, no GPU, no licence acceptance.
+run:
+  id: test_tiny_with_ref
+
+dataset:
+  kind: local
+  path: tests/fixtures/tiny_with_ref.tsv
+  lang_pair: en-fr
+  domain: general
+  columns:
+    source: source
+    target: target
+    reference: reference
+    gold: gold
+    segment_id: segment_id
+    lang_pair: lang_pair
+    domain: domain
+
+scorers:
+  - ref: sacrebleu/bleu
+  - ref: sacrebleu/chrf
+  - ref: sacrebleu/chrf++
+  - ref: sacrebleu/ter
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]

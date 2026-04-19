@@ -1,0 +1,16 @@
+# Core runtime dependencies for mt-metrix.
+# Install optional families separately:
+#   pip install -e ".[comet]"         # COMET family (unbabel-comet)
+#   pip install -e ".[tower]"         # Tower family (vllm, transformers)
+#   pip install -e ".[tower-local]"   # Transformers-only fallback (Mac/CPU)
+#   pip install -e ".[dev]"           # Test / lint tooling
+
+pyyaml>=6.0
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+tqdm>=4.65
+datasets>=2.14
+huggingface_hub>=0.20
+sacrebleu>=2.4.0
+rich>=13.0

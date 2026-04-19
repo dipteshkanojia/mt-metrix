@@ -1,0 +1,18 @@
+# surrey-nlp/General-QE — domain-specific QE for Indic general-domain translations.
+# Lang pairs: en-gu, en-hi, en-mr, en-ta, en-te.
+# https://hf.co/datasets/surrey-nlp/General-QE
+#
+# Known data quirks (see gyroQE/data/raw/HUGGINGFACE_DATASETS.md):
+#   - en-Marathi: missing `mean` column, uses space-separated scores.
+#     Prefer `z_mean` (present) as the gold target.
+
+kind: huggingface
+repo: surrey-nlp/General-QE
+split: test
+domain: general
+columns:
+  source: source_text
+  target: target_text
+  gold: z_mean
+  lang_pair: "@from:language_pair"
+  domain: "@constant:general"

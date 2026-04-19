@@ -1,0 +1,27 @@
+# Run config that exercises the "dataset has no references, ref-based
+# metrics should be skipped" path.
+run:
+  id: test_tiny_no_ref
+
+dataset:
+  kind: local
+  path: tests/fixtures/tiny_no_ref.tsv
+  lang_pair: en-fr
+  domain: general
+  columns:
+    source: source
+    target: target
+    gold: gold
+    segment_id: segment_id
+    lang_pair: lang_pair
+    domain: domain
+
+scorers:
+  - ref: sacrebleu/bleu       # should be skipped
+  - ref: sacrebleu/chrf       # should be skipped
+  - ref: sacrebleu/chrf++     # should be skipped
+  - ref: sacrebleu/ter        # should be skipped
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]

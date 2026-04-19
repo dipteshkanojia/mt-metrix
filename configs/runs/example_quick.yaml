@@ -1,0 +1,35 @@
+# Quick smoke test — small, fast, no licence acceptance required.
+#
+# Uses the distilled COMET checkpoint (cometinho) + sacrebleu on the first 20
+# rows of Surrey Legal-QE. No gated models. Expected to finish in 1–2 min on
+# one A100 (first run slower due to model download).
+#
+# Useful for: "did my install work?" and "did my cluster env pick the right
+# torch/CUDA?" — NOT for publishable results.
+
+run:
+  id: example_quick
+
+dataset:
+  kind: huggingface
+  repo: surrey-nlp/Legal-QE
+  split: test
+  domain: legal
+  limit: 20
+  columns:
+    source: source_text
+    target: target_text
+    gold: z_mean
+    lang_pair: "@from:language_pair"
+    domain: "@constant:legal"
+
+scorers:
+  - ref: comet/eamt22-cometinho-da         # reference-based; will be skipped (no ref)
+  - ref: comet/wmt22-cometkiwi-da          # QE; runs without reference
+    overrides:
+      batch_size: 32
+  - ref: sacrebleu/chrf                     # reference-based; will be skipped
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]

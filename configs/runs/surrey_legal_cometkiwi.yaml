@@ -1,0 +1,22 @@
+# Surrey Legal-QE × CometKiwi-22 — the single most useful baseline run.
+#
+# Runs CometKiwi-22 (reference-free) on the full Surrey Legal-QE test split
+# (en-gu, en-ta, en-te). Pearson/Spearman/Kendall vs. `z_mean` end up in
+# summary.json, per-segment scores in segments.tsv and segments.jsonl.
+#
+# Notes:
+#   - CometKiwi is gated on HF — accept the licence and set HF_TOKEN.
+#   - Expected runtime on one A100 80GB: ~5–10 minutes.
+#   - Add `overrides: { batch_size: 32 }` if you hit OOM on a smaller GPU.
+
+run:
+  id: surrey_legal_cometkiwi
+
+dataset: !include ../datasets/surrey_legal.yaml
+
+scorers:
+  - ref: comet/wmt22-cometkiwi-da
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]

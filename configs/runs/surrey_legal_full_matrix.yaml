@@ -1,0 +1,60 @@
+# Surrey Legal-QE — FULL matrix: COMET × Tower × sacrebleu.
+#
+# The "flagship" run for the Legal domain. Runs every QE-capable metric on
+# the full Legal-QE test set and records correlations with `z_mean` in
+# summary.json. Reference-based entries are retained in the scorer list so
+# summary.json's `skipped_metrics` documents that they were considered but
+# skipped (Legal-QE has no reference column).
+#
+# Recommended execution:
+#   mt-metrix submit --config configs/runs/surrey_legal_full_matrix.yaml
+# This will pick per-scorer SLURM resources (GPU count, memory, time) using
+# the heuristic in submit/slurm.py and submit one sbatch job per scorer.
+#
+# To run locally instead (one scorer at a time, in-process):
+#   mt-metrix score --config configs/runs/surrey_legal_full_matrix.yaml
+
+run:
+  id: surrey_legal_full_matrix
+
+dataset: !include ../datasets/surrey_legal.yaml
+
+scorers:
+  # --- COMET QE family (reference-free) ---------------------------------
+  - ref: comet/wmt22-cometkiwi-da
+  - ref: comet/wmt23-cometkiwi-da-xl
+  - ref: comet/wmt23-cometkiwi-da-xxl
+  - ref: comet/xcomet-xl-qe
+  - ref: comet/xcomet-xxl-qe
+  - ref: comet/wmt20-comet-qe-da
+  - ref: comet/wmt21-comet-qe-da
+  - ref: comet/wmt21-comet-qe-mqm
+
+  # --- COMET reference-based (will be skipped) --------------------------
+  - ref: comet/wmt22-comet-da
+  - ref: comet/eamt22-cometinho-da
+  - ref: comet/xcomet-xl
+  - ref: comet/xcomet-xxl
+
+  # --- Tower (GEMBA-DA) --------------------------------------------------
+  - ref: tower/tower-plus-2b
+  - ref: tower/towerinstruct-7b-v0.2
+  - ref: tower/towerinstruct-mistral-7b-v0.2
+  - ref: tower/towerinstruct-wmt24-chat-7b
+  - ref: tower/towerinstruct-13b-v0.1
+  - ref: tower/tower-plus-9b
+  - ref: tower/tower-plus-72b
+
+  # --- Tower (GEMBA-MQM) -------------------------------------------------
+  - ref: tower/towerinstruct-7b-v0.2-mqm
+  - ref: tower/tower-plus-9b-mqm
+
+  # --- sacrebleu (reference-based, will be skipped) ---------------------
+  - ref: sacrebleu/bleu
+  - ref: sacrebleu/chrf
+  - ref: sacrebleu/chrf++
+  - ref: sacrebleu/ter
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]

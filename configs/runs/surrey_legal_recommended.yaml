@@ -1,0 +1,27 @@
+# Surrey Legal-QE — "recommended" subset.
+#
+# A smaller, opinionated set for when you don't need the full matrix:
+#   - CometKiwi-22 + CometKiwi-XL (the two QE workhorses)
+#   - XCOMET-XL-QE (explainable QE, gives error spans)
+#   - Tower-Plus-9B GEMBA-DA + MQM (good LLM-as-judge default)
+#   - TowerInstruct-7B-v0.2 GEMBA-DA (fast LLM sanity check)
+#
+# Fits on a single A100 80GB sequentially in roughly 30–45 min.
+# Copy and swap the `dataset:` include to run on General / Tourism / Health.
+
+run:
+  id: surrey_legal_recommended
+
+dataset: !include ../datasets/surrey_legal.yaml
+
+scorers:
+  - ref: comet/wmt22-cometkiwi-da
+  - ref: comet/wmt23-cometkiwi-da-xl
+  - ref: comet/xcomet-xl-qe
+  - ref: tower/towerinstruct-7b-v0.2
+  - ref: tower/tower-plus-9b
+  - ref: tower/tower-plus-9b-mqm
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]

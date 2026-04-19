@@ -1,0 +1,11 @@
+segment_id	source	target	gold	lang_pair	domain
+q001	The cat sat on the mat.	Le chat était assis sur le tapis.	0.82	en-fr	general
+q002	I love programming.	J'aime programmer.	0.65	en-fr	general
+q003	The sun rises in the east.	Le soleil se lève à l'est.	0.91	en-fr	general
+q004	She opened the door slowly.	Elle ouvrit la porte lentement.	0.74	en-fr	general
+q005	He drinks coffee every morning.	Il boit du café chaque matin.	0.88	en-fr	general
+q006	Time flies when you are having fun.	Le temps file quand on s'amuse.	0.55	en-fr	general
+q007	The meeting is scheduled for tomorrow.	La réunion est prévue pour demain.	0.79	en-fr	general
+q008	Please close the window behind you.	S'il vous plaît fermez la fenêtre derrière vous.	0.68	en-fr	general
+q009	The children are playing in the garden.	Les enfants jouent dans le jardin.	0.84	en-fr	general
+q010	This book is very interesting.	Ce livre est très intéressant.	0.90	en-fr	general

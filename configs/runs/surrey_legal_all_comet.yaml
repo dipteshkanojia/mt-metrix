@@ -1,0 +1,40 @@
+# Surrey Legal-QE × every COMET variant in the catalogue.
+#
+# Produces per-segment scores for the full COMET family so you can compare
+# QE checkpoints on the same data. Reference-based metrics in the list will
+# be skipped (Surrey Legal-QE has no reference column) and flagged in
+# summary.json's `skipped_metrics`.
+#
+# Notes:
+#   - XL/XXL checkpoints (cometkiwi-xl/xxl, XCOMET-XL/XXL) need A100 80GB.
+#   - All gated — ensure HF_TOKEN is set and licences accepted.
+#   - Expected wall-clock on one A100 80GB (sequential): ~45–90 min.
+#   - Submit via: `mt-metrix submit --config configs/runs/surrey_legal_all_comet.yaml`.
+
+run:
+  id: surrey_legal_all_comet
+
+dataset: !include ../datasets/surrey_legal.yaml
+
+scorers:
+  # QE (reference-free) — the ones that actually score Legal-QE.
+  - ref: comet/wmt22-cometkiwi-da
+  - ref: comet/wmt23-cometkiwi-da-xl
+  - ref: comet/wmt23-cometkiwi-da-xxl
+  - ref: comet/wmt20-comet-qe-da
+  - ref: comet/wmt21-comet-qe-da
+  - ref: comet/wmt21-comet-qe-mqm
+  - ref: comet/xcomet-xl-qe
+  - ref: comet/xcomet-xxl-qe
+
+  # Reference-based — recorded as skipped (no ref column).
+  - ref: comet/wmt22-comet-da
+  - ref: comet/eamt22-cometinho-da
+  - ref: comet/wmt20-comet-da
+  - ref: comet/wmt21-comet-da
+  - ref: comet/xcomet-xl
+  - ref: comet/xcomet-xxl
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]

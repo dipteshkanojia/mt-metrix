@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mt-metrix"
+version = "0.1.0"
+description = "Comprehensive MT evaluation suite: COMET, Tower, reference metrics, run from a single config."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Diptesh Kanojia" }]
+keywords = ["machine-translation", "quality-estimation", "comet", "tower", "bleu", "chrf", "evaluation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+dependencies = [
+    "pyyaml>=6.0",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+    "tqdm>=4.65",
+    "datasets>=2.14",
+    "huggingface_hub>=0.20",
+    "sacrebleu>=2.4.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+# COMET family: reference-based (wmt22-comet-da), reference-free
+# (wmt22-cometkiwi-da, cometkiwi-xl/xxl), and explainable (XCOMET-XL/XXL).
+comet = [
+    "unbabel-comet>=2.2.2",
+]
+# Tower family: LLM-prompted scoring via GEMBA-DA / GEMBA-MQM.
+# vLLM is the preferred inference backend. Install with a matching CUDA build.
+tower = [
+    "vllm>=0.5.0",
+    "transformers>=4.40",
+    "torch>=2.4",
+    "accelerate>=0.30",
+]
+# Small-model local smoke tests (CPU / Mac MPS) — transformers fallback.
+tower-local = [
+    "transformers>=4.40",
+    "torch>=2.4",
+    "accelerate>=0.30",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+]
+all = ["mt-metrix[comet,tower,dev]"]
+
+[project.scripts]
+mt-metrix = "mt_metrix.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/dipteshkanojia/mt-metrix"
+Issues = "https://github.com/dipteshkanojia/mt-metrix/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --strict-markers"
+markers = [
+    "slow: tests that download models or need a GPU (skipped unless MT_METRIX_RUN_SLOW=1)",
+]

@@ -1,0 +1,14 @@
+# surrey-nlp/health-QE — domain-specific QE for Indic health-domain translations.
+# Lang pairs: en-gu, en-hi, en-mr, en-ta.
+# https://hf.co/datasets/surrey-nlp/health-QE
+
+kind: huggingface
+repo: surrey-nlp/health-QE
+split: test
+domain: health
+columns:
+  source: source_text
+  target: target_text
+  gold: z_mean
+  lang_pair: "@from:language_pair"
+  domain: "@constant:health"
