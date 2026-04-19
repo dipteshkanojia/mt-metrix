@@ -35,8 +35,17 @@ red()   { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 # ------------------------------------------------- 1. scratch layout
 
 green "=== 1. Scratch layout ==="
-mkdir -p "$SCRATCH/models" "$SCRATCH/hf_cache" "$SCRATCH/outputs"
+mkdir -p "$SCRATCH/models" "$SCRATCH/hf_cache" "$SCRATCH/outputs" "$SCRATCH/tmp" "$SCRATCH/pip_cache"
 echo "  SCRATCH = $SCRATCH"
+
+# Redirect pip's build isolation and cache to scratch.
+# /tmp on AISURREY login nodes is small (few GB); pip install of vllm or
+# flash-attn downloads multi-GB CUDA wheels into its isolated build env and
+# fills /tmp. PIP_CACHE_DIR on scratch also keeps $HOME quota safe.
+export TMPDIR="$SCRATCH/tmp"
+export PIP_CACHE_DIR="$SCRATCH/pip_cache"
+echo "  TMPDIR           = $TMPDIR"
+echo "  PIP_CACHE_DIR    = $PIP_CACHE_DIR"
 
 # ------------------------------------------------- 2. clone / pull
 

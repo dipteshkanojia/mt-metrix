@@ -39,11 +39,14 @@ comet = [
     "unbabel-comet>=2.2.2",
 ]
 # Tower family: LLM-prompted scoring via GEMBA-DA / GEMBA-MQM.
-# vLLM is the preferred inference backend. Install with a matching CUDA build.
+# vLLM is the preferred inference backend. Pin kept tight so pip can't pull
+# a bleeding-edge vllm that requires torch 2.5+ as a BUILD dep (would trigger
+# multi-GB downloads on top of the cluster's torch 2.4.1+cu121 pin). vllm 0.6.x
+# is the last line that builds against torch 2.4.
 tower = [
-    "vllm>=0.5.0",
+    "vllm>=0.5.0,<0.7",
     "transformers>=4.40",
-    "torch>=2.4",
+    "torch>=2.4,<2.5",
     "accelerate>=0.30",
 ]
 # Small-model local smoke tests (CPU / Mac MPS) — transformers fallback.
