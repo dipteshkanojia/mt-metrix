@@ -89,12 +89,33 @@ else
     conda activate "$CONDA_ENV_PREFIX"
 fi
 
+# Use the env's pip explicitly so we never accidentally pip into base.
+PIP="$CONDA_ENV_PREFIX/bin/pip"
+
 # torch pin first — cluster driver is CUDA 12.06; 2.4.1+cu121 is the known-good build
 echo "  installing torch (2.4.1+cu121)..."
-pip install --quiet $TORCH_PIN
+"$PIP" install --progress-bar off $TORCH_PIN
 
-echo "  installing mt-metrix with [comet,tower] extras..."
-pip install --quiet -e ".[comet,tower]"
+# [dev] brings pytest in so the smoke test below can run.
+echo "  installing mt-metrix with [comet,tower,dev] extras..."
+"$PIP" install --progress-bar off -e ".[comet,tower,dev]"
+
+# Sanity import — fail loudly here rather than at SLURM job time.
+echo "  verifying imports..."
+"$CONDA_ENV_PREFIX/bin/python" -c "
+import mt_metrix, torch, sacrebleu
+print(f'  mt_metrix ok, torch {torch.__version__}, sacrebleu {sacrebleu.__version__}')
+try:
+    import vllm
+    print(f'  vllm {vllm.__version__} ok')
+except Exception as e:
+    print(f'  vllm import failed: {e.__class__.__name__}: {e}')
+try:
+    import comet
+    print(f'  unbabel-comet ok')
+except Exception as e:
+    print(f'  comet import failed: {e.__class__.__name__}: {e}')
+"
 
 # ------------------------------------------------- 4. HF token
 
@@ -113,7 +134,14 @@ fi
 # ------------------------------------------------- 5. smoke test
 
 green "=== 5. Smoke test (fast pytest suite) ==="
-if ! pytest tests/ -q --no-header 2>&1 | tail -3; then
+# Use env's pytest path; relying on PATH post-activation has bitten us.
+PYTEST="$CONDA_ENV_PREFIX/bin/pytest"
+if [ ! -x "$PYTEST" ]; then
+    red "  $PYTEST not found — [dev] extra didn't install pytest."
+    red "  Re-run: '$PIP' install -e \".[comet,tower,dev]\""
+    exit 1
+fi
+if ! "$PYTEST" tests/ -q --no-header 2>&1 | tail -5; then
     red "  pytest failed — investigate before submitting jobs"
     exit 1
 fi
