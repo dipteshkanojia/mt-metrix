@@ -1,0 +1,157 @@
+# COMET family catalogue — one entry per Unbabel checkpoint.
+#
+# Parameter defaults follow the COMET paper series:
+#   Rei et al. 2020 (COMET)             — arXiv:2009.09025
+#   Rei et al. 2022 (COMET-22, Kiwi-22) — arXiv:2204.12463, 2209.06243
+#   Rei et al. 2023 (Kiwi-23 XL/XXL)    — arXiv:2306.11925
+#   Guerreiro et al. 2023 (XCOMET)      — arXiv:2310.10482
+#
+# `needs_reference: true` → reference-based; skip when dataset has no refs.
+# `needs_reference: false` → QE mode (Kiwi, XCOMET QE).
+#
+# XL/XXL models are GATED on HuggingFace — accept the licence on each model's
+# web page and set $HF_TOKEN (see docs/AISURREY.md).
+
+family: comet
+
+models:
+
+  # --- Reference-based DA (comet-da) ------------------------------------
+  wmt22-comet-da:
+    model: Unbabel/wmt22-comet-da
+    needs_reference: true
+    notes: "WMT22 SOTA DA metric, XLM-R-large backbone."
+    params:
+      batch_size: 64
+      gpus: 1
+      num_workers: 2
+      progress_bar: true
+
+  eamt22-cometinho-da:
+    model: Unbabel/eamt22-cometinho-da
+    needs_reference: true
+    notes: "Lightweight distilled COMET (EAMT 2022)."
+    params:
+      batch_size: 128
+      gpus: 1
+      num_workers: 2
+      progress_bar: true
+
+  wmt20-comet-da:
+    model: Unbabel/wmt20-comet-da
+    needs_reference: true
+    notes: "Historical WMT20 DA baseline."
+    params:
+      batch_size: 64
+      gpus: 1
+
+  wmt21-comet-da:
+    model: Unbabel/wmt21-comet-da-marian
+    needs_reference: true
+    notes: "WMT21 DA (Marian port of the original checkpoint)."
+    params:
+      batch_size: 64
+      gpus: 1
+
+  # --- Reference-free QE (comet-qe / cometkiwi) -------------------------
+  wmt22-cometkiwi-da:
+    model: Unbabel/wmt22-cometkiwi-da
+    needs_reference: false
+    notes: "CometKiwi (WMT22) — reference-free, InfoXLM-large. Gated."
+    params:
+      batch_size: 64
+      gpus: 1
+      num_workers: 2
+      progress_bar: true
+
+  wmt23-cometkiwi-da-xl:
+    model: Unbabel/wmt23-cometkiwi-da-xl
+    needs_reference: false
+    notes: "CometKiwi-XL (WMT23) — XLM-R-XL 3.5B. Gated."
+    params:
+      batch_size: 16
+      gpus: 1
+      num_workers: 2
+      progress_bar: true
+
+  wmt23-cometkiwi-da-xxl:
+    model: Unbabel/wmt23-cometkiwi-da-xxl
+    needs_reference: false
+    notes: "CometKiwi-XXL (WMT23) — XLM-R-XXL 10.7B. Gated."
+    params:
+      batch_size: 8
+      gpus: 1
+      num_workers: 2
+      progress_bar: true
+
+  wmt20-comet-qe-da:
+    model: Unbabel/wmt20-comet-qe-da
+    needs_reference: false
+    notes: "Historical QE baseline (WMT20)."
+    params:
+      batch_size: 64
+      gpus: 1
+
+  wmt21-comet-qe-da:
+    model: Unbabel/wmt21-comet-qe-da-marian
+    needs_reference: false
+    notes: "WMT21 QE (Marian)."
+    params:
+      batch_size: 64
+      gpus: 1
+
+  wmt21-comet-qe-mqm:
+    model: Unbabel/wmt21-comet-qe-mqm-marian
+    needs_reference: false
+    notes: "WMT21 QE trained on MQM (Marian)."
+    params:
+      batch_size: 64
+      gpus: 1
+
+  # --- Explainable (XCOMET) --------------------------------------------
+  xcomet-xl:
+    model: Unbabel/XCOMET-XL
+    needs_reference: true
+    notes: "XCOMET-XL — explainable reference-based metric. Returns error spans. Gated."
+    params:
+      batch_size: 16
+      gpus: 1
+      num_workers: 2
+      progress_bar: true
+      output_seg_err_spans: true
+
+  xcomet-xxl:
+    model: Unbabel/XCOMET-XXL
+    needs_reference: true
+    notes: "XCOMET-XXL — explainable reference-based metric. Gated."
+    params:
+      batch_size: 8
+      gpus: 1
+      num_workers: 2
+      progress_bar: true
+      output_seg_err_spans: true
+
+  # --- QE-mode XCOMET (pass reference=None) ----------------------------
+  # XCOMET in QE-mode: same checkpoint, ref is omitted. We expose this as
+  # a separate ref so users can pick it explicitly.
+  xcomet-xl-qe:
+    model: Unbabel/XCOMET-XL
+    needs_reference: false
+    notes: "XCOMET-XL in QE mode (no reference)."
+    params:
+      batch_size: 16
+      gpus: 1
+      num_workers: 2
+      progress_bar: true
+      output_seg_err_spans: true
+
+  xcomet-xxl-qe:
+    model: Unbabel/XCOMET-XXL
+    needs_reference: false
+    notes: "XCOMET-XXL in QE mode (no reference)."
+    params:
+      batch_size: 8
+      gpus: 1
+      num_workers: 2
+      progress_bar: true
+      output_seg_err_spans: true

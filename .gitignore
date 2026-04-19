@@ -32,8 +32,11 @@ htmlcov/
 .DS_Store
 
 # Project-specific: outputs, models, caches
+# NOTE: leading slash anchors to repo root — `models/` without the slash would
+# also match `configs/models/`, which holds the scorer catalogue YAMLs we DO
+# want tracked. That bug cost us a first-deploy cluster smoke-test round-trip.
 outputs/
-models/
+/models/
 hf-cache/
 data/cache/
 data/raw/

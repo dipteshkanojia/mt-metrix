@@ -103,10 +103,11 @@ echo "  installing torch (2.4.0+cu121)..."
 "$PIP" install --progress-bar off $TORCH_PIN
 
 # unbabel-comet imports `pkg_resources` (from setuptools) at module load time.
-# Modern conda envs with python 3.10 don't always ship setuptools by default,
-# so install it explicitly before the mt-metrix install triggers comet import.
-echo "  installing setuptools (pkg_resources) for unbabel-comet..."
-"$PIP" install --progress-bar off setuptools
+# setuptools 81+ restructured/removed pkg_resources, so installing the latest
+# gives us 82.x which has NO importable pkg_resources — comet then crashes with
+# ModuleNotFoundError. Pin below 81 to get the classic pkg_resources module.
+echo "  installing setuptools<81 (keeps pkg_resources importable for unbabel-comet)..."
+"$PIP" install --progress-bar off "setuptools<81"
 
 # [dev] brings pytest in so the smoke test below can run.
 echo "  installing mt-metrix with [comet,tower,dev] extras..."

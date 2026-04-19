@@ -1,0 +1,47 @@
+# Reference-based lexical metrics via sacrebleu (≥2.4).
+#
+# Defaults follow WMT practice:
+#   BLEU:    tokenize=13a, smooth=exp, lowercase=false
+#   chrF++:  char_order=6, word_order=2, beta=2, lowercase=false, use_effective_order=true
+#   TER:     normalized=false, no_punct=false, asian_support=true, case_sensitive=true
+#
+# chrF++ (the "++" variant used by WMT for reporting) is selected by setting
+# chrf_word_order=2. chrF alone is chrf_word_order=0.
+
+family: sacrebleu
+
+models:
+  bleu:
+    notes: "Corpus BLEU (Papineni 2002; sacrebleu signatures)."
+    params:
+      metric: bleu
+      tokenize: "13a"
+      smooth_method: exp
+      lowercase: false
+
+  chrf:
+    notes: "chrF (Popović 2017) — char_order=6, word_order=0, beta=2."
+    params:
+      metric: chrf
+      chrf_order: 6
+      chrf_word_order: 0
+      beta: 2
+      lowercase: false
+
+  chrf++:
+    notes: "chrF++ — word-order=2, WMT default."
+    params:
+      metric: chrf
+      chrf_order: 6
+      chrf_word_order: 2
+      beta: 2
+      lowercase: false
+
+  ter:
+    notes: "Translation Error Rate (Snover 2006)."
+    params:
+      metric: ter
+      normalized: false
+      no_punct: false
+      asian_support: true
+      case_sensitive: true

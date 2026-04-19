@@ -1,0 +1,179 @@
+# Tower family catalogue — LLM-based scoring via GEMBA-DA / GEMBA-MQM /
+# Tower-native prompts. Every entry is a `family: tower` scorer that the
+# runner builds through the vLLM (default) or transformers backend.
+#
+# Source papers:
+#   Alves et al. 2024 (Tower)                      — arXiv:2402.17733
+#   Kocmi & Federmann 2023 (GEMBA-DA, GEMBA-MQM)   — EAMT 2023
+#   Pombal et al. 2025 (Tower-Plus)                — Unbabel blog/report
+#
+# Default prompt_mode is gemba-da (single-float score, max_tokens=50,
+# temperature=0.0). Switch to gemba-mqm for MQM-weighted scoring.
+#
+# Tensor parallelism (`tensor_parallel_size`) is auto-picked by the scorer
+# based on model size; override via overrides in the run config if needed.
+#
+# All Tower models are CC-BY-NC-4.0 — research use only.
+
+family: tower
+
+models:
+
+  # --- Base models (pre-instruction-tuning) ---------------------------
+  towerbase-7b-v0.1:
+    model: Unbabel/TowerBase-7B-v0.1
+    notes: "Tower Base 7B, Llama-2 backbone. Not instruction-tuned — expect lower parse_ok."
+    params:
+      prompt_mode: gemba-da
+      backend: vllm
+      temperature: 0.0
+      top_p: 1.0
+      max_tokens: 50
+      tensor_parallel_size: 1
+
+  towerbase-13b-v0.1:
+    model: Unbabel/TowerBase-13B-v0.1
+    notes: "Tower Base 13B."
+    params:
+      prompt_mode: gemba-da
+      backend: vllm
+      temperature: 0.0
+      max_tokens: 50
+      tensor_parallel_size: 2
+
+  # --- Instruction-tuned (TowerInstruct) -----------------------------
+  towerinstruct-7b-v0.1:
+    model: Unbabel/TowerInstruct-7B-v0.1
+    notes: "First instruction-tuned Tower (Jan 2024)."
+    params:
+      prompt_mode: gemba-da
+      backend: vllm
+      temperature: 0.0
+      max_tokens: 50
+      tensor_parallel_size: 1
+
+  towerinstruct-7b-v0.2:
+    model: Unbabel/TowerInstruct-7B-v0.2
+    notes: "Tower Instruct 7B v0.2 (Feb 2024) — recommended 7B default."
+    params:
+      prompt_mode: gemba-da
+      backend: vllm
+      temperature: 0.0
+      max_tokens: 50
+      tensor_parallel_size: 1
+
+  towerinstruct-13b-v0.1:
+    model: Unbabel/TowerInstruct-13B-v0.1
+    notes: "Tower Instruct 13B (Jan 2024)."
+    params:
+      prompt_mode: gemba-da
+      backend: vllm
+      temperature: 0.0
+      max_tokens: 50
+      tensor_parallel_size: 2
+
+  towerinstruct-mistral-7b-v0.2:
+    model: Unbabel/TowerInstruct-Mistral-7B-v0.2
+    notes: "Mistral-based Tower Instruct (Mar 2024). Different chat template."
+    params:
+      prompt_mode: gemba-da
+      backend: vllm
+      temperature: 0.0
+      max_tokens: 50
+      tensor_parallel_size: 1
+
+  towerinstruct-wmt24-chat-7b:
+    model: Unbabel/TowerInstruct-WMT24-Chat-7B
+    notes: "WMT24-specific Tower variant."
+    params:
+      prompt_mode: gemba-da
+      backend: vllm
+      temperature: 0.0
+      max_tokens: 50
+      tensor_parallel_size: 1
+
+  # --- Tower-Plus (2025) ---------------------------------------------
+  tower-plus-2b:
+    model: Unbabel/Tower-Plus-2B
+    notes: "Tower-Plus 2B (Gemma2 backbone). Smallest — good for smoke tests."
+    params:
+      prompt_mode: gemba-da
+      backend: vllm
+      temperature: 0.0
+      max_tokens: 50
+      tensor_parallel_size: 1
+
+  tower-plus-9b:
+    model: Unbabel/Tower-Plus-9B
+    notes: "Tower-Plus 9B (Gemma2 backbone). Recommended general default."
+    params:
+      prompt_mode: gemba-da
+      backend: vllm
+      temperature: 0.0
+      max_tokens: 50
+      tensor_parallel_size: 2
+
+  tower-plus-72b:
+    model: Unbabel/Tower-Plus-72B
+    notes: "Tower-Plus 72B (Qwen2 backbone). Needs 4× A100 80GB."
+    params:
+      prompt_mode: gemba-da
+      backend: vllm
+      temperature: 0.0
+      max_tokens: 50
+      tensor_parallel_size: 4
+
+  # --- GEMBA-MQM aliases ---------------------------------------------
+  # Same models with MQM prompting. Handy when you want both in one run —
+  # reference them as `tower/towerinstruct-7b-v0.2-mqm` etc.
+
+  towerinstruct-7b-v0.2-mqm:
+    model: Unbabel/TowerInstruct-7B-v0.2
+    notes: "7B with GEMBA-MQM prompt (longer output, richer extras)."
+    params:
+      prompt_mode: gemba-mqm
+      backend: vllm
+      temperature: 0.0
+      max_tokens: 384
+      tensor_parallel_size: 1
+
+  towerinstruct-13b-v0.1-mqm:
+    model: Unbabel/TowerInstruct-13B-v0.1
+    notes: "13B with GEMBA-MQM prompt."
+    params:
+      prompt_mode: gemba-mqm
+      backend: vllm
+      temperature: 0.0
+      max_tokens: 384
+      tensor_parallel_size: 2
+
+  tower-plus-9b-mqm:
+    model: Unbabel/Tower-Plus-9B
+    notes: "Tower-Plus 9B with GEMBA-MQM prompt."
+    params:
+      prompt_mode: gemba-mqm
+      backend: vllm
+      temperature: 0.0
+      max_tokens: 384
+      tensor_parallel_size: 2
+
+  tower-plus-72b-mqm:
+    model: Unbabel/Tower-Plus-72B
+    notes: "Tower-Plus 72B with GEMBA-MQM prompt."
+    params:
+      prompt_mode: gemba-mqm
+      backend: vllm
+      temperature: 0.0
+      max_tokens: 384
+      tensor_parallel_size: 4
+
+  # --- Tower-native (chat template) ----------------------------------
+  towerinstruct-7b-v0.2-native:
+    model: Unbabel/TowerInstruct-7B-v0.2
+    notes: "Tower-native prompt (system+user chat framing)."
+    params:
+      prompt_mode: tower-native
+      backend: vllm
+      temperature: 0.0
+      max_tokens: 50
+      tensor_parallel_size: 1
