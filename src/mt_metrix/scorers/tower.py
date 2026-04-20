@@ -222,6 +222,43 @@ class TowerScorer:
             del self._engine
             self._engine = None
             self._tokenizer = None
+
+            # vLLM persists its model-parallel state at module level
+            # (``vllm.distributed.parallel_state``). Without explicit
+            # teardown, the NEXT Tower scorer in the same process hits
+            # "tensor parallel group already initialized, but of unexpected
+            # size: get_tensor_model_parallel_world_size()=N vs.
+            # tensor_model_parallel_size=M" whenever its tp differs from
+            # the previous scorer's. Observed 2026-04-20 in a full-matrix
+            # run on AISURREY a100 (4 GPUs): a prior tp=1 Tower-7B pinned
+            # the group to world_size=1, and Tower-13B/Tower-Plus-9B/72B
+            # (tp=2 / tp=4) all died at LLM() init before generating a
+            # single token.
+            if self._backend == "vllm":
+                try:
+                    from vllm.distributed.parallel_state import (
+                        destroy_distributed_environment,
+                        destroy_model_parallel,
+                    )
+
+                    destroy_model_parallel()
+                    destroy_distributed_environment()
+                except Exception as e:  # pragma: no cover — defensive
+                    log.warning("vLLM parallel-state teardown raised: %s", e)
+
+                # Ray is used by vLLM for tp>1. Leaving it up attaches the
+                # next scorer to the existing cluster with the old
+                # world_size, which defeats the parallel_state teardown.
+                try:
+                    import ray
+
+                    if ray.is_initialized():
+                        ray.shutdown()
+                except ImportError:  # pragma: no cover — vllm pulls ray
+                    pass
+                except Exception as e:  # pragma: no cover — defensive
+                    log.warning("ray.shutdown raised: %s", e)
+
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
