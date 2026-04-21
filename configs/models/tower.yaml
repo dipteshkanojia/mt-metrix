@@ -13,6 +13,15 @@
 # Tensor parallelism (`tensor_parallel_size`) is auto-picked by the scorer
 # based on model size; override via overrides in the run config if needed.
 #
+# VRAM sizing (fp16):
+#   7B  ≈ 14 GB   — tp=1 fits anywhere
+#   9B  ≈ 18 GB   — tp=1 fits on 48 GB+ cards (L40s, A6000, A100)
+#   13B ≈ 26 GB   — tp=1 fits on 48 GB+ cards
+#   72B ≈ 144 GB  — tp=4 on A100 80GB; tp=2 won't fit
+# Keep tp minimal: process-global vLLM distributed state persists across
+# scorer loads (see TowerScorer.unload() + tests/test_scorers_tower_unload.py),
+# and every tp>1 load pins the process into that regime.
+#
 # All Tower models are CC-BY-NC-4.0 — research use only.
 
 family: tower
@@ -33,13 +42,13 @@ models:
 
   towerbase-13b-v0.1:
     model: Unbabel/TowerBase-13B-v0.1
-    notes: "Tower Base 13B."
+    notes: "Tower Base 13B. 26 GB fp16 — fits tp=1 on A100 80GB / L40s 48GB."
     params:
       prompt_mode: gemba-da
       backend: vllm
       temperature: 0.0
       max_tokens: 50
-      tensor_parallel_size: 2
+      tensor_parallel_size: 1
 
   # --- Instruction-tuned (TowerInstruct) -----------------------------
   towerinstruct-7b-v0.1:
@@ -64,13 +73,13 @@ models:
 
   towerinstruct-13b-v0.1:
     model: Unbabel/TowerInstruct-13B-v0.1
-    notes: "Tower Instruct 13B (Jan 2024)."
+    notes: "Tower Instruct 13B (Jan 2024). 26 GB fp16 — tp=1 on A100 80GB / L40s 48GB."
     params:
       prompt_mode: gemba-da
       backend: vllm
       temperature: 0.0
       max_tokens: 50
-      tensor_parallel_size: 2
+      tensor_parallel_size: 1
 
   towerinstruct-mistral-7b-v0.2:
     model: Unbabel/TowerInstruct-Mistral-7B-v0.2
@@ -89,6 +98,12 @@ models:
       # Pinning max_model_len tells vLLM not to infer from the HF config and
       # sidesteps the bug. 8192 covers GEMBA-DA prompts with plenty of margin.
       max_model_len: 8192
+      # 2026-04-21: max_model_len alone still raised the TypeError on AISURREY
+      # (vllm 0.6.3.post1, torch 2.4.0+cu121). Setting disable_sliding_window
+      # removes sliding_window from the HF config before vLLM reads it, which
+      # skips the broken code path entirely. See
+      # src/mt_metrix/scorers/tower.py::_load_vllm for the passthrough.
+      disable_sliding_window: true
 
   towerinstruct-wmt24-chat-7b:
     model: Unbabel/TowerInstruct-WMT24-Chat-7B
@@ -113,17 +128,22 @@ models:
 
   tower-plus-9b:
     model: Unbabel/Tower-Plus-9B
-    notes: "Tower-Plus 9B (Gemma2 backbone). Recommended general default."
+    notes: "Tower-Plus 9B (Gemma2 backbone). Recommended general default. 18 GB fp16 — tp=1 anywhere 24 GB+."
     params:
       prompt_mode: gemba-da
       backend: vllm
       temperature: 0.0
       max_tokens: 50
-      tensor_parallel_size: 2
+      tensor_parallel_size: 1
 
   tower-plus-72b:
     model: Unbabel/Tower-Plus-72B
-    notes: "Tower-Plus 72B (Qwen2 backbone). Needs 4× A100 80GB."
+    notes: |
+      Tower-Plus 72B (Qwen2 backbone). 144 GB fp16 — genuinely needs tp=4
+      on A100 80GB. On AISURREY this means `--gres=gpu:4 -p a100` with
+      real queue time; runs submitted on `gpu:1` will be skipped by the
+      runner ("required GPUs exceeds placement group size"). Use a
+      72b-only run config when the queue opens.
     params:
       prompt_mode: gemba-da
       backend: vllm
@@ -147,27 +167,27 @@ models:
 
   towerinstruct-13b-v0.1-mqm:
     model: Unbabel/TowerInstruct-13B-v0.1
-    notes: "13B with GEMBA-MQM prompt."
+    notes: "13B with GEMBA-MQM prompt. tp=1 (fits 48GB+ at 26 GB fp16)."
     params:
       prompt_mode: gemba-mqm
       backend: vllm
       temperature: 0.0
       max_tokens: 384
-      tensor_parallel_size: 2
+      tensor_parallel_size: 1
 
   tower-plus-9b-mqm:
     model: Unbabel/Tower-Plus-9B
-    notes: "Tower-Plus 9B with GEMBA-MQM prompt."
+    notes: "Tower-Plus 9B with GEMBA-MQM prompt. tp=1 (18 GB fp16)."
     params:
       prompt_mode: gemba-mqm
       backend: vllm
       temperature: 0.0
       max_tokens: 384
-      tensor_parallel_size: 2
+      tensor_parallel_size: 1
 
   tower-plus-72b-mqm:
     model: Unbabel/Tower-Plus-72B
-    notes: "Tower-Plus 72B with GEMBA-MQM prompt."
+    notes: "Tower-Plus 72B with GEMBA-MQM prompt. Needs gpu:4 — see tower-plus-72b note."
     params:
       prompt_mode: gemba-mqm
       backend: vllm

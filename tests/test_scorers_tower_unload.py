@@ -49,6 +49,15 @@ def _install_fakes(monkeypatch):
     fake_ray.shutdown = ray_shutdown
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
 
+    # tower.py's unload() also does `import torch` to call cuda.empty_cache().
+    # Dev laptops without torch installed would otherwise raise ImportError
+    # inside the outer try/except, skipping the parallel-state teardown we're
+    # actually testing here. Stub torch with a CUDA-disabled fake so the call
+    # chain completes end-to-end.
+    fake_torch = mock.MagicMock()
+    fake_torch.cuda.is_available = mock.Mock(return_value=False)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
     return destroy_mp, destroy_env, ray_shutdown, ray_is_init
 
 
@@ -172,6 +181,10 @@ def test_unload_survives_teardown_exception(monkeypatch):
     fake_ray.is_initialized = ray_is_init
     fake_ray.shutdown = ray_shutdown
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
+
+    fake_torch = mock.MagicMock()
+    fake_torch.cuda.is_available = mock.Mock(return_value=False)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
     # Should not raise despite destroy_model_parallel blowing up.
     scorer.unload()

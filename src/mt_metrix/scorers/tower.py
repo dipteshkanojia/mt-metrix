@@ -87,6 +87,7 @@ class TowerScorer:
         max_model_len = params.get("max_model_len")
         gpu_mem = float(params.get("gpu_memory_utilization", 0.90))
         download_dir = params.get("download_dir")
+        disable_sliding_window = params.get("disable_sliding_window")
 
         kwargs: dict[str, Any] = dict(
             model=self._cfg.model,
@@ -99,6 +100,18 @@ class TowerScorer:
             kwargs["max_model_len"] = int(max_model_len)
         if download_dir is not None:
             kwargs["download_dir"] = str(download_dir)
+        if disable_sliding_window is not None:
+            # Escape hatch for Mistral-backbone Tower variants: vLLM 0.6.x
+            # raises ``TypeError: unsupported operand type(s) for *: 'int'
+            # and 'NoneType'`` when it tries to derive a sliding-window
+            # bound for a model whose HF config advertises sliding_window
+            # but leaves max_position_embeddings unset in the spot vLLM
+            # reads. Passing disable_sliding_window=True removes the
+            # attribute before vLLM inspects it, which bypasses the
+            # broken branch. Only pass it through when the catalogue set
+            # it explicitly — leaving it absent preserves vLLM's default
+            # (enable) for every other model.
+            kwargs["disable_sliding_window"] = bool(disable_sliding_window)
 
         log.info("loading Tower model via vLLM: %s (tp=%d)", self._cfg.model, tp)
         self._engine = LLM(**kwargs)
