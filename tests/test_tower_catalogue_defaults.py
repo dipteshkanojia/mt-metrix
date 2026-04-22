@@ -116,8 +116,13 @@ def test_mistral_has_disable_sliding_window(catalogue):
         "see configs/models/tower.yaml header and "
         "src/mt_metrix/scorers/tower.py::_load_vllm."
     )
-    # Also double-check the existing max_model_len pin is still there.
-    assert params.get("max_model_len") == 8192, (
-        "towerinstruct-mistral-7b-v0.2 must still pin max_model_len=8192 — "
-        "the disable_sliding_window workaround is additive, not a replacement."
+    # max_model_len pin MUST match vLLM's sliding-window-derived cap
+    # (4096). Setting it higher trips _get_and_verify_max_len's validator
+    # even when disable_sliding_window is on — vLLM still uses
+    # sliding_window to compute the derived bound. 4096 is 5x the
+    # GEMBA-DA prompt length, 2.5x the GEMBA-MQM prompt length.
+    assert params.get("max_model_len") == 4096, (
+        "towerinstruct-mistral-7b-v0.2 must pin max_model_len=4096 — "
+        "higher values trip vLLM's sliding-window-derived cap validator. "
+        "See configs/models/tower.yaml for the full rationale."
     )

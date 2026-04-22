@@ -90,19 +90,29 @@ models:
       temperature: 0.0
       max_tokens: 50
       tensor_parallel_size: 1
-      # Mistral's HF config advertises sliding_window + a large
-      # max_position_embeddings. vLLM 0.6.x disables FlashAttention-2 (sliding
-      # window) and falls through a code path that multiplies max_position_
-      # embeddings by something that can be None, raising:
-      #   TypeError: unsupported operand type(s) for *: 'int' and 'NoneType'
-      # Pinning max_model_len tells vLLM not to infer from the HF config and
-      # sidesteps the bug. 8192 covers GEMBA-DA prompts with plenty of margin.
-      max_model_len: 8192
-      # 2026-04-21: max_model_len alone still raised the TypeError on AISURREY
-      # (vllm 0.6.3.post1, torch 2.4.0+cu121). Setting disable_sliding_window
-      # removes sliding_window from the HF config before vLLM reads it, which
-      # skips the broken code path entirely. See
-      # src/mt_metrix/scorers/tower.py::_load_vllm for the passthrough.
+      # Mistral's HF config advertises sliding_window=4096 alongside a large
+      # max_position_embeddings. vLLM 0.6.x has two distinct failure modes
+      # that compound here:
+      #
+      # (a) A nil-propagation bug in the sliding-window path multiplies
+      #     max_position_embeddings by something that can be None, raising:
+      #       TypeError: unsupported operand type(s) for *: 'int' and 'NoneType'
+      #     Fix: disable_sliding_window: true (catalogue passthrough lives
+      #     in src/mt_metrix/scorers/tower.py::_load_vllm). This dodges the
+      #     broken branch entirely.
+      #
+      # (b) Even with sliding-window disabled for attention, vLLM's
+      #     ``_get_and_verify_max_len`` still derives max_model_len from
+      #     sliding_window=4096 and validates any user-supplied
+      #     max_model_len against it. We originally pinned 8192 (seen in the
+      #     2026-04-21 AISURREY run), which tripped:
+      #       ValueError: User-specified max_model_len (8192) is greater
+      #       than the derived max_model_len (sliding_window=4096...)
+      #     Fix: match the derived cap (4096). GEMBA-DA prompts are under
+      #     800 tokens, GEMBA-MQM under 1500, so 4096 gives 2.5-5x headroom.
+      #     Verified 2026-04-22 in AISURREY job 2108138's skipped_metrics
+      #     reason string.
+      max_model_len: 4096
       disable_sliding_window: true
 
   towerinstruct-wmt24-chat-7b:
