@@ -128,6 +128,15 @@ class TowerScorer:
         params = self._cfg.params
         log.info("loading Tower model via transformers: %s", self._cfg.model)
         self._tokenizer = AutoTokenizer.from_pretrained(self._cfg.model)
+        # Mistral's tokeniser ships no pad_token; HF pipeline batch>1
+        # decoding crashes at the tokeniser padding step without one.
+        # Reusing eos_token is the canonical causal-LM workaround. Also
+        # pin padding_side=left so the generated continuation starts
+        # flush with the prompt — right-padding shifts the prompt into
+        # pad tokens and the first generated token is garbage.
+        if self._tokenizer.pad_token_id is None:
+            self._tokenizer.pad_token = self._tokenizer.eos_token
+        self._tokenizer.padding_side = "left"
         model = AutoModelForCausalLM.from_pretrained(
             self._cfg.model,
             torch_dtype=params.get("torch_dtype", "auto"),

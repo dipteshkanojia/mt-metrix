@@ -83,37 +83,32 @@ models:
 
   towerinstruct-mistral-7b-v0.2:
     model: Unbabel/TowerInstruct-Mistral-7B-v0.2
-    notes: "Mistral-based Tower Instruct (Mar 2024). Different chat template."
+    notes: |
+      Mistral-backbone Tower Instruct (Mar 2024). Runs on the HF
+      transformers backend rather than vLLM — vLLM 0.6.3's Llama path
+      crashes at LlamaAttention.__init__ (llama.py:134):
+
+          self.q_size = self.num_heads * self.head_dim
+          TypeError: unsupported operand type(s) for *: 'int' and 'NoneType'
+
+      because Mistral's HF config omits ``head_dim`` and vLLM reads it
+      raw rather than deriving hidden_size // num_heads. Neither
+      ``disable_sliding_window`` nor a ``max_model_len`` pin touches
+      this call site — both were tried 2026-04-21/22 on AISURREY (jobs
+      2108138-series and 2108721-series) and both failed at the same
+      traceback. Upgrading past vLLM 0.6.x is blocked by our torch
+      2.4.0 pin. Mistral-7B fp16 ≈ 14 GB fits single-GPU on any 24 GB+
+      card via HF pipeline with device_map=auto.
+
+      Slower than vLLM-backed Tower peers (rough order-of-magnitude:
+      ~30 min/domain at batch_size=8 vs ~5 min for vLLM). Acceptable
+      for a single scorer; revisit if a vLLM upgrade unblocks us.
     params:
       prompt_mode: gemba-da
-      backend: vllm
+      backend: transformers
       temperature: 0.0
       max_tokens: 50
-      tensor_parallel_size: 1
-      # Mistral's HF config advertises sliding_window=4096 alongside a large
-      # max_position_embeddings. vLLM 0.6.x has two distinct failure modes
-      # that compound here:
-      #
-      # (a) A nil-propagation bug in the sliding-window path multiplies
-      #     max_position_embeddings by something that can be None, raising:
-      #       TypeError: unsupported operand type(s) for *: 'int' and 'NoneType'
-      #     Fix: disable_sliding_window: true (catalogue passthrough lives
-      #     in src/mt_metrix/scorers/tower.py::_load_vllm). This dodges the
-      #     broken branch entirely.
-      #
-      # (b) Even with sliding-window disabled for attention, vLLM's
-      #     ``_get_and_verify_max_len`` still derives max_model_len from
-      #     sliding_window=4096 and validates any user-supplied
-      #     max_model_len against it. We originally pinned 8192 (seen in the
-      #     2026-04-21 AISURREY run), which tripped:
-      #       ValueError: User-specified max_model_len (8192) is greater
-      #       than the derived max_model_len (sliding_window=4096...)
-      #     Fix: match the derived cap (4096). GEMBA-DA prompts are under
-      #     800 tokens, GEMBA-MQM under 1500, so 4096 gives 2.5-5x headroom.
-      #     Verified 2026-04-22 in AISURREY job 2108138's skipped_metrics
-      #     reason string.
-      max_model_len: 4096
-      disable_sliding_window: true
+      batch_size: 8
 
   towerinstruct-wmt24-chat-7b:
     model: Unbabel/TowerInstruct-WMT24-Chat-7B

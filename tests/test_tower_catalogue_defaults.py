@@ -43,14 +43,14 @@ def catalogue() -> dict:
 
 
 # Entries that MUST ship tp=1. Keyed by catalogue entry name.
-# If you add a new 7B/9B/13B Tower entry, add it here and default to tp=1.
+# If you add a new 7B/9B/13B Tower entry that runs on vLLM, add it here
+# and default to tp=1.
 SINGLE_GPU_ENTRIES = {
     "towerbase-7b-v0.1",
     "towerbase-13b-v0.1",
     "towerinstruct-7b-v0.1",
     "towerinstruct-7b-v0.2",
     "towerinstruct-13b-v0.1",
-    "towerinstruct-mistral-7b-v0.2",
     "towerinstruct-wmt24-chat-7b",
     "tower-plus-2b",
     "tower-plus-9b",
@@ -64,6 +64,16 @@ SINGLE_GPU_ENTRIES = {
 QUAD_GPU_ENTRIES = {
     "tower-plus-72b",
     "tower-plus-72b-mqm",
+}
+
+# Entries that run on the HF transformers backend instead of vLLM.
+# Typically forced there by a vLLM incompatibility we cannot fix via
+# version bump (e.g. our torch 2.4.0 pin holds vllm at 0.6.x). These
+# entries must NOT carry vLLM-only knobs (tensor_parallel_size,
+# max_model_len, disable_sliding_window) — the transformers backend
+# ignores them and their presence misleads readers.
+TRANSFORMERS_BACKEND_ENTRIES = {
+    "towerinstruct-mistral-7b-v0.2",
 }
 
 
@@ -97,32 +107,49 @@ def test_large_entry_keeps_tp4(catalogue, entry_name):
 def test_every_entry_covered(catalogue):
     """No Tower catalogue entry is left untyped by this policy."""
     all_entries = set(catalogue.keys())
-    classified = SINGLE_GPU_ENTRIES | QUAD_GPU_ENTRIES
+    classified = (
+        SINGLE_GPU_ENTRIES | QUAD_GPU_ENTRIES | TRANSFORMERS_BACKEND_ENTRIES
+    )
     uncovered = all_entries - classified
     assert not uncovered, (
-        f"New catalogue entries not classified by tp policy: {sorted(uncovered)}. "
-        f"Add them to SINGLE_GPU_ENTRIES or QUAD_GPU_ENTRIES in this test."
+        f"New catalogue entries not classified by backend/tp policy: "
+        f"{sorted(uncovered)}. Add them to SINGLE_GPU_ENTRIES, "
+        f"QUAD_GPU_ENTRIES, or TRANSFORMERS_BACKEND_ENTRIES in this test."
     )
 
 
-def test_mistral_has_disable_sliding_window(catalogue):
-    """2026-04-21 regression: ``disable_sliding_window: true`` must be set
-    on the Mistral-backbone Tower entry to bypass vLLM 0.6.x's TypeError.
-    Without it, the scorer raises at LLM() init and the runner skips it."""
-    entry = catalogue["towerinstruct-mistral-7b-v0.2"]
+@pytest.mark.parametrize("entry_name", sorted(TRANSFORMERS_BACKEND_ENTRIES))
+def test_transformers_backend_entry(catalogue, entry_name):
+    """2026-04-22: vLLM 0.6.3's Llama path crashes at
+    ``LlamaAttention.__init__`` (llama.py:134,
+    ``self.q_size = self.num_heads * self.head_dim``) for the
+    Mistral-backbone Tower variant because Mistral's HF config omits
+    ``head_dim`` and vLLM reads it raw rather than deriving it from
+    hidden_size // num_heads. The HF transformers backend sidesteps
+    the bug entirely. Upgrading past vLLM 0.6.x is blocked by our
+    torch 2.4.0 pin (vllm 0.6.x / torchvision 0.19.0 / xformers
+    0.0.27.post2 all hard-pin torch==2.4.0). See
+    configs/models/tower.yaml entry notes."""
+    entry = catalogue.get(entry_name)
+    assert entry is not None, (
+        f"Catalogue missing expected entry {entry_name!r}. If the entry "
+        f"was removed intentionally, drop it from "
+        f"TRANSFORMERS_BACKEND_ENTRIES in this test."
+    )
     params = entry.get("params", {})
-    assert params.get("disable_sliding_window") is True, (
-        "towerinstruct-mistral-7b-v0.2 must set disable_sliding_window: true — "
-        "see configs/models/tower.yaml header and "
-        "src/mt_metrix/scorers/tower.py::_load_vllm."
+    assert params.get("backend") == "transformers", (
+        f"{entry_name}: backend must be 'transformers' to sidestep the "
+        f"vLLM 0.6.3 Mistral head_dim crash. See tower.yaml notes."
     )
-    # max_model_len pin MUST match vLLM's sliding-window-derived cap
-    # (4096). Setting it higher trips _get_and_verify_max_len's validator
-    # even when disable_sliding_window is on — vLLM still uses
-    # sliding_window to compute the derived bound. 4096 is 5x the
-    # GEMBA-DA prompt length, 2.5x the GEMBA-MQM prompt length.
-    assert params.get("max_model_len") == 4096, (
-        "towerinstruct-mistral-7b-v0.2 must pin max_model_len=4096 — "
-        "higher values trip vLLM's sliding-window-derived cap validator. "
-        "See configs/models/tower.yaml for the full rationale."
-    )
+    # vLLM-only knobs must be absent — keeping them would be confusing
+    # noise and also signal misconfiguration to the next reader.
+    for vllm_only_key in (
+        "tensor_parallel_size",
+        "max_model_len",
+        "disable_sliding_window",
+    ):
+        assert vllm_only_key not in params, (
+            f"{entry_name}: {vllm_only_key!r} is vLLM-only — remove it "
+            f"from a transformers-backend entry to avoid misleading "
+            f"configuration noise."
+        )
