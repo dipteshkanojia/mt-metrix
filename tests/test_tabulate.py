@@ -14,6 +14,8 @@ import pytest
 
 from mt_metrix.reports.tabulate import (
     Cell,
+    LANG_ALIAS,
+    canonicalise_lang_pair,
     classify_scorer,
     collect_records,
     discover_runs,
@@ -313,3 +315,153 @@ def test_tabulate_errors_when_no_runs_match(tmp_path: Path):
     from mt_metrix.reports.tabulate import tabulate as tab
     with pytest.raises(FileNotFoundError, match="no run directories matched"):
         tab(runs_glob=str(tmp_path / "does-not-exist-*"), out_dir=tmp_path / "r")
+
+
+# ---------------------------------------------------------------------------
+# canonicalise_lang_pair + cross-dataset spelling tolerance
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "raw,canonical",
+    [
+        # Full-name forms shipped by Surrey Legal/General/Health/Tourism.
+        ("en-gujarati", "en-gu"),
+        ("en-hindi", "en-hi"),
+        ("en-marathi", "en-mr"),
+        ("en-tamil", "en-ta"),
+        ("en-telugu", "en-te"),
+        # Contracted forms shipped by Low-resource-QE-DA multilingual subset.
+        ("engu", "en-gu"),
+        ("enhi", "en-hi"),
+        ("enmr", "en-mr"),
+        ("enta", "en-ta"),
+        ("ente", "en-te"),
+        # Already-canonical codes pass through.
+        ("en-gu", "en-gu"),
+        ("en-hi", "en-hi"),
+        # Uppercase input still canonicalises (HF sometimes upper-cases).
+        ("EN-GUJARATI", "en-gu"),
+        ("EnGu", "en-gu"),
+        # Unknown pairs pass through lowered but unchanged — won't crash,
+        # just won't render under LANG_ORDER until LANG_ALIAS is extended.
+        ("en-xx", "en-xx"),
+        ("pl-en", "pl-en"),
+        # Empty is preserved (used as skipped-scorer placeholder).
+        ("", ""),
+    ],
+)
+def test_canonicalise_lang_pair(raw: str, canonical: str):
+    assert canonicalise_lang_pair(raw) == canonical
+
+
+def test_lang_alias_covers_every_canonical_lang_order_code():
+    """Every canonical ISO code in LANG_ORDER must be reachable from at
+    least one full-name and one contracted alias. Guards against someone
+    adding a new column header without teaching the alias map."""
+    from mt_metrix.reports.tabulate import LANG_ORDER
+
+    canonical_targets = set(LANG_ALIAS.values())
+    for code in LANG_ORDER:
+        assert code in canonical_targets, (
+            f"LANG_ORDER code {code!r} has no LANG_ALIAS entry mapping to "
+            f"it — add the full-name and contracted forms for this pair."
+        )
+
+
+def test_collect_records_canonicalises_full_name_lang_pairs(tmp_path: Path):
+    """Integration: a run whose segments.tsv stores ``en-gujarati`` /
+    ``en-hindi`` etc. (as the Surrey HF configs publish) must produce
+    RunRecords keyed on the canonical ``en-gu`` / ``en-hi`` — otherwise
+    the per-lang columns in paper_table.md / .tex render as NA because
+    the renderer iterates LANG_ORDER, which only holds the canonical
+    codes. Captured from the IndicQE paper-prep batch 2026-04-22."""
+    outputs = tmp_path / "outputs"
+    _write_fake_run(
+        outputs / "surrey_general_full_matrix",
+        domain="general",
+        rows_per_lang={
+            # Full-name codes exactly as the HF configs publish them.
+            "en-gujarati": [
+                (0.9, {"kiwi-da": 0.85}),
+                (0.6, {"kiwi-da": 0.55}),
+                (0.3, {"kiwi-da": 0.30}),
+                (0.1, {"kiwi-da": 0.10}),
+            ],
+            "en-hindi": [
+                (0.8, {"kiwi-da": 0.75}),
+                (0.4, {"kiwi-da": 0.45}),
+                (0.2, {"kiwi-da": 0.20}),
+                (0.0, {"kiwi-da": 0.05}),
+            ],
+        },
+        scorer_meta=[
+            {"family": "comet", "name": "kiwi-da", "model": "Unbabel/kiwi-da", "params": {}},
+        ],
+    )
+    run_dirs = discover_runs(str(outputs / "surrey_*_full_matrix"))
+    catalogues = {
+        "comet/kiwi-da": {"family": "comet", "name": "kiwi-da", "needs_reference": False},
+    }
+    records = collect_records(run_dirs, catalogues)
+    # Lang_pair on every record must already be canonical; neither raw
+    # full-name string should survive into the record set.
+    lang_pairs = {r.lang_pair for r in records}
+    assert lang_pairs == {"en-gu", "en-hi"}, (
+        f"expected canonicalisation to en-gu / en-hi, got {lang_pairs!r}"
+    )
+    # And the correlations still compute (the canonicalisation must be
+    # pure key-renaming, not data loss).
+    engu = next(r for r in records if r.lang_pair == "en-gu")
+    assert engu.spearman is not None and engu.spearman > 0.9
+
+
+def test_render_markdown_populates_per_lang_columns_for_full_name_dataset(
+    tmp_path: Path,
+):
+    """End-to-end: with full-name lang_pair input, the GFM table's per-lang
+    cells under LANG_ORDER headers must contain real values rather than
+    the em-dash NA placeholder that the pre-canonicalisation build used to
+    emit (confirmed 2026-04-22 against AISURREY IndicQE paper_table.md)."""
+    outputs = tmp_path / "outputs"
+    _write_fake_run(
+        outputs / "surrey_general_full_matrix",
+        domain="general",
+        rows_per_lang={
+            "en-gujarati": [
+                (0.9, {"kiwi-da": 0.85}),
+                (0.6, {"kiwi-da": 0.55}),
+                (0.3, {"kiwi-da": 0.30}),
+                (0.1, {"kiwi-da": 0.10}),
+            ],
+        },
+        scorer_meta=[
+            {"family": "comet", "name": "kiwi-da", "model": "Unbabel/kiwi-da", "params": {}},
+        ],
+    )
+    run_dirs = discover_runs(str(outputs / "surrey_*_full_matrix"))
+    catalogues = {
+        "comet/kiwi-da": {"family": "comet", "name": "kiwi-da", "needs_reference": False},
+    }
+    records = collect_records(run_dirs, catalogues)
+    out = tmp_path / "report" / "paper_table.md"
+    render_markdown(records, out, metric="spearman")
+    txt = out.read_text(encoding="utf-8")
+    # The kiwi-da row for general/en-gu must contain a concrete number
+    # under the En-Gu column. We look for the kiwi-da line and confirm it
+    # contains at least one non-em-dash numeric cell.
+    lines = [l for l in txt.splitlines() if "kiwi-da" in l]
+    assert lines, "kiwi-da row should be present in markdown output"
+    da_row = lines[0]
+    # Regression guard: before the canonicalisation fix, all five per-lang
+    # columns rendered as em-dash for a full-name dataset. Only En-Gu is
+    # non-NA here (the fixture only ships en-gujarati) — so exactly four
+    # em-dashes are expected, not five.
+    assert da_row.count("—") == 4, (
+        f"expected 4 NA cells (Hi/Mr/Ta/Te absent) + 1 real cell (Gu), got "
+        f"{da_row.count('—')} NA cells. Row: {da_row!r}"
+    )
+    # And the Gu cell must hold a concrete numeric value rendered bold
+    # (best-in-column with only one row in the column means it wins).
+    cells = [tok.strip() for tok in da_row.split("|") if tok.strip()]
+    # Row is: Domain, Group, Model, Hi, Mr, Ta, Te, Gu, Avg => Gu is index 7
+    assert cells[7] == "**1.00**", f"En-Gu cell wrong: {cells[7]!r} in {da_row!r}"

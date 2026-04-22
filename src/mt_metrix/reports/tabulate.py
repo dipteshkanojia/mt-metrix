@@ -67,6 +67,48 @@ DOMAIN_LABEL = {
     "tourism": "Tourism",
 }
 
+# Canonicalise lang_pair codes that come out of heterogeneous datasets.
+# Surrey Legal/General/Health/Tourism publish full-name hyphenated forms
+# (``en-gujarati``, ``en-hindi``, ``en-marathi``, ``en-tamil``, ``en-telugu``);
+# Low-resource-QE-DA's ``multilingual`` subset publishes contracted glued
+# forms (``engu``, ``enhi``, …). Both must land on the paper's canonical
+# ISO-639-1 hyphenated form (``en-gu``, ``en-hi``, …) BEFORE pivoting, or the
+# per-language columns in paper_table.md / .tex render as NA even though the
+# underlying correlations computed just fine. This is the "cross-dataset
+# lang_pair codes differ" gotcha flagged under IndicQE paper scope in
+# ``docs/INDIC_QE_DATASETS.md`` — fixed here at the tabulate ingestion
+# boundary so downstream consumers don't need to remember.
+LANG_ALIAS: dict[str, str] = {
+    # Full-name forms (Surrey Legal/General/Health/Tourism HF configs).
+    "en-gujarati": "en-gu",
+    "en-hindi": "en-hi",
+    "en-marathi": "en-mr",
+    "en-tamil": "en-ta",
+    "en-telugu": "en-te",
+    # Contracted glued forms (Low-resource-QE-DA multilingual subset).
+    "engu": "en-gu",
+    "enhi": "en-hi",
+    "enmr": "en-mr",
+    "enta": "en-ta",
+    "ente": "en-te",
+}
+
+
+def canonicalise_lang_pair(lp: str) -> str:
+    """Map any known lang_pair spelling onto its canonical ISO form.
+
+    Accepts anything that appears in the Surrey dataset family (full-name
+    ``en-gujarati``, contracted ``engu``, canonical ``en-gu``). Unknown
+    values pass through lowered but otherwise unchanged — a new pair added
+    at the dataset level won't crash tabulation, it just won't land in
+    ``LANG_ORDER`` and will only show up in the ``Avg`` column until
+    ``LANG_ALIAS`` is taught about it.
+    """
+    if not lp:
+        return lp
+    key = str(lp).lower()
+    return LANG_ALIAS.get(key, key)
+
 
 def classify_scorer(family: str, name: str, needs_reference: bool | None) -> str:
     """Return the five-way group bucket for (family, name, needs_reference).
@@ -138,6 +180,11 @@ def _per_lang_correlations(run_dir: Path, scorer_names: list[str]) -> dict[tuple
         return out
 
     for lp, sub_df in df.groupby("lang_pair", sort=False):
+        # Canonicalise at ingestion: any LANG_ALIAS entry (en-gujarati,
+        # engu, …) lands on en-gu before it's used as a dict key, so
+        # downstream pivot/render code sees only canonical ISO codes and
+        # the LANG_ORDER lookup in render_{markdown,latex} hits.
+        lp_canon = canonicalise_lang_pair(str(lp))
         sub_gold = pd.to_numeric(sub_df["gold"], errors="coerce")
         for col in scorer_names:
             if col not in sub_df.columns:
@@ -145,12 +192,12 @@ def _per_lang_correlations(run_dir: Path, scorer_names: list[str]) -> dict[tuple
             pred = pd.to_numeric(sub_df[col], errors="coerce")
             mask = pred.notna() & sub_gold.notna()
             if mask.sum() < 2:
-                out[(col, str(lp))] = {
+                out[(col, lp_canon)] = {
                     "pearson": None, "spearman": None, "kendall": None,
                     "spa": None, "n": int(mask.sum()),
                 }
                 continue
-            out[(col, str(lp))] = _correlations(
+            out[(col, lp_canon)] = _correlations(
                 pred[mask].to_numpy(), sub_gold[mask].to_numpy()
             )
     return out
