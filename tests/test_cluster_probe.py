@@ -1484,7 +1484,8 @@ def test_main_tee_alternatives_oserror_is_non_fatal(probe, monkeypatch, capsys, 
 # ---------------------------------------------------------------------------
 
 def test_render_table_has_queue_columns(probe, monkeypatch, capsys, tmp_path):
-    """The human-readable table must show `next free` and `pending` columns."""
+    """The human-readable table must show `next free` and `pending` columns
+    with actual data, not just empty headers."""
     monkeypatch.setattr(probe, "run_scontrol_show_node", lambda: SCONTROL_FIXTURE)
     monkeypatch.setattr(probe, "run_squeue", lambda: SQUEUE_FIXTURE)
     cfg = tmp_path / "run.yaml"
@@ -1498,10 +1499,21 @@ def test_render_table_has_queue_columns(probe, monkeypatch, capsys, tmp_path):
     out = capsys.readouterr().out
     assert "next free" in out
     assert "pending" in out
+    # nice-project has free L40s GPUs; its row should read "now" in the
+    # next-free column. This proves the column is populated from
+    # attach_queue_stats, not just a header.
+    nice_lines = [ln for ln in out.splitlines() if ln.lstrip().startswith("nice-project")]
+    assert len(nice_lines) == 1, f"expected one nice-project row, got: {nice_lines}"
+    assert " now " in nice_lines[0], f"nice-project row missing 'now': {nice_lines[0]!r}"
 
 
 def test_render_table_tags_blocklisted(probe, monkeypatch, capsys, tmp_path):
-    """cogvis-project row must be tagged [not ours] and not recommended."""
+    """cogvis-project row must be tagged [not ours] AND not show 'now'.
+
+    Blocklisted partitions get the [not ours] marker, sort below real
+    options, and never read 'now' in the 'next free' column even when
+    they have free GPUs (guarded by `not blocked` in render_table).
+    """
     monkeypatch.setattr(probe, "run_scontrol_show_node", lambda: SCONTROL_FIXTURE)
     monkeypatch.setattr(probe, "run_squeue", lambda: "")
     cfg = tmp_path / "run.yaml"
@@ -1513,8 +1525,18 @@ def test_render_table_tags_blocklisted(probe, monkeypatch, capsys, tmp_path):
         "--no-colour",
     ])
     out = capsys.readouterr().out
-    assert "cogvis-project" in out
-    assert "[not ours]" in out
+    # Locate the cogvis-project row specifically — substring-in-output is
+    # too loose; tag could drift to header/footer without a row-level check.
+    cogvis_lines = [ln for ln in out.splitlines() if "cogvis-project" in ln]
+    assert len(cogvis_lines) == 1, f"expected one cogvis-project row, got: {cogvis_lines}"
+    cogvis_line = cogvis_lines[0]
+    assert "[not ours]" in cogvis_line
+    # "now" must NOT appear for a blocklisted partition even if gpus_free
+    # >= req.gpus. Check with surrounding whitespace to avoid false positive
+    # from substrings like "nowait" or the column header.
+    assert " now " not in cogvis_line, (
+        f"blocklisted row should not read 'now'; got: {cogvis_line!r}"
+    )
 
 
 def test_json_output_includes_alternatives(probe, monkeypatch, capsys, tmp_path):
@@ -1539,3 +1561,30 @@ def test_json_output_includes_alternatives(probe, monkeypatch, capsys, tmp_path)
     # With this config (Kiwi-DA 8 GB), nice-project should top the list.
     assert payload["alternatives"][0]["partition"] == "nice-project"
     assert payload["recommendation"] == "nice-project"
+
+
+def test_json_recommendation_set_even_when_equal_to_target(
+    probe, monkeypatch, capsys, tmp_path,
+):
+    """JSON `recommendation` is the raw pick, even when it equals request.partition.
+
+    Previously (legacy alias) this field was None when the recommender
+    agreed with --partition. The Task 8 rename to `recommended_name`
+    removed that nulling; downstream consumers should rely on comparing
+    to `request.partition` themselves if they want a 'recommender
+    disagrees' signal.
+    """
+    import json as jsonmod
+    monkeypatch.setattr(probe, "run_scontrol_show_node", lambda: SCONTROL_FIXTURE)
+    monkeypatch.setattr(probe, "run_squeue", lambda: SQUEUE_FIXTURE)
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("scorers:\n  - ref: comet/wmt22-cometkiwi-da\n")
+    probe.main([
+        "--config", str(cfg),
+        "--partition", "nice-project", "--gpus", "1",
+        "--slurm-script", "/dev/null",
+        "--json",
+    ])
+    payload = jsonmod.loads(capsys.readouterr().out)
+    assert payload["recommendation"] == "nice-project"
+    assert payload["request"]["partition"] == "nice-project"

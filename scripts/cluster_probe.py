@@ -956,11 +956,12 @@ def render_table(
     lines.append(header)
     lines.append("  " + "-" * (len(header) - 2))
     def sort_key(p: Partition) -> tuple[int, int, int]:
+        """Sort ranks: target=0, ready=1, contested=2, unknown-vram=3, blocklist=4, no-fit=5, fit-missing=6."""
         fit = fits.get(p.name)
         if p.name == req.partition:
             return (0, 0, 0)
         if fit is None:
-            return (5, 0, 0)
+            return (6, 0, 0)
         if is_blocklisted(p.name):
             return (4, 0, 0)
         rank = {
