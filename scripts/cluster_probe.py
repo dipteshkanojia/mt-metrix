@@ -56,20 +56,44 @@ from typing import Optional
 # GPU-type → VRAM (GiB) lookup. Substring match is case-insensitive on the
 # Gres string. This is the AISURREY fleet as of 2026-04; extend if the
 # cluster grows new cards.
+#
+# ORDER MATTERS — substring match is first-win. More-specific substrings MUST
+# come before shorter generic ones (``rtx_5000_ada`` before ``rtx_5000``;
+# ``rtx_a5000`` before ``a5000``; etc.), otherwise a 32 GB Ada card would be
+# reported as a 16 GB Quadro RTX 5000.
 # ---------------------------------------------------------------------------
 
 GPU_VRAM_GB: list[tuple[str, int]] = [
-    ("a100",          80),
-    ("h100",          80),
-    ("l40s",          48),
-    ("a6000",         48),
-    ("rtx8000",       48),
+    # 80 GB
+    ("a100",            80),
+    ("h100",            80),
+    # 48 GB
     ("quadro_rtx_8000", 48),
-    ("3090",          24),
-    ("rtx_3090",      24),
-    ("rtx3090",       24),
-    ("2080",          11),
-    ("rtx_2080",      11),
+    ("rtx_8000",        48),
+    ("rtx8000",         48),
+    ("l40s",            48),
+    ("rtx_a6000",       48),
+    ("a6000",           48),
+    # 32 GB — MUST precede ``rtx_5000`` / ``quadro_rtx_5000`` (16 GB)
+    ("rtx_5000_ada",    32),
+    ("rtx5000_ada",     32),
+    # 24 GB
+    ("rtx_a5000",       24),
+    ("a5000",           24),
+    ("rtx_3090",        24),
+    ("rtx3090",         24),
+    ("geforce_rtx_3090", 24),
+    ("3090",            24),
+    # 20 GB
+    ("rtx_a4500",       20),
+    ("a4500",           20),
+    # 16 GB — AFTER the 32 GB Ada variants
+    ("quadro_rtx_5000", 16),
+    ("rtx_5000",        16),
+    # 11 GB
+    ("rtx_2080",        11),
+    ("2080ti",          11),
+    ("2080",            11),
 ]
 
 
@@ -93,19 +117,25 @@ def vram_for_gpu_type(gpu_type: str) -> int:
 # ---------------------------------------------------------------------------
 
 # Order matters — first match wins (most specific → least specific).
-VRAM_HINTS_GB: list[tuple[re.Pattern[str], int, str]] = [
+# Each entry is (pattern, vram_gb, tp, label). ``tp`` is the tensor-parallel
+# size the runner actually asks vLLM for (matches scorer.default_tp). When
+# a scorer needs tp > requested --gres=gpu:N, the runner skips it at
+# load time, so the probe must do the same when inferring peak VRAM —
+# otherwise a single 72B entry in a mixed matrix pollutes the whole
+# estimate and every partition misfires to NO-FIT.
+VRAM_HINTS_GB: list[tuple[re.Pattern[str], int, int, str]] = [
     # 72B Tower on a100 only (tp=4, 144 GB fp16 total).
-    (re.compile(r"(?i)72b"),                 80, "Tower-72B (tp=4 a100 only)"),
+    (re.compile(r"(?i)72b"),                                  80, 4, "Tower-72B (needs tp=4, a100 only)"),
     # XXL COMET fp32 state dict + 10.7B backbone → 48 GB floor.
-    (re.compile(r"(?i)\bxxl\b|cometkiwi-da-xxl|xcomet-xxl"), 48, "COMET-XXL"),
-    # 13B Tower = 26 GB fp16 — 48 GB card.
-    (re.compile(r"(?i)13b"),                 48, "Tower-13B"),
-    # 9B Tower = 18 GB fp16 — fits 24 GB but tight; 48 GB comfortable.
-    (re.compile(r"(?i)\b9b\b|tower-plus-9b"), 24, "Tower-9B"),
+    (re.compile(r"(?i)\bxxl\b|cometkiwi-da-xxl|xcomet-xxl"),  48, 1, "COMET-XXL"),
+    # 13B Tower = 26 GB fp16 — 48 GB card, tp=1 on a 48 GB.
+    (re.compile(r"(?i)13b"),                                  48, 1, "Tower-13B"),
+    # 9B Tower = 18 GB fp16 — fits 24 GB but tight; 48 GB comfortable, tp=1.
+    (re.compile(r"(?i)\b9b\b|tower-plus-9b"),                 24, 1, "Tower-9B"),
     # 7B Tower, Mistral-7B, COMET-XL (3.5B → 7 GB peak).
-    (re.compile(r"(?i)\b7b\b|mistral|\bxl\b"), 24, "Tower-7B / COMET-XL"),
+    (re.compile(r"(?i)\b7b\b|mistral|\bxl\b"),                24, 1, "Tower-7B / COMET-XL"),
     # 2B Tower, Kiwi-DA base, everything smaller.
-    (re.compile(r"(?i)\b2b\b"),              11, "Tower-2B"),
+    (re.compile(r"(?i)\b2b\b"),                               11, 1, "Tower-2B"),
     # Fallback default (Kiwi-DA, COMET-base, Cometinho, sacrebleu).
     # Anything below matches this fallthrough.
 ]
@@ -121,34 +151,65 @@ class ConfigVRAMNeed:
     in the catalogue and unload tests), so the job's real VRAM need is the
     MAX per-scorer peak, not the sum. That's the number we compare against
     each partition's per-node VRAM.
+
+    ``skipped_tp`` reports scorers that WOULD run on more GPUs but will be
+    skipped by the runner given the currently requested --gres=gpu:N. Their
+    VRAM is NOT counted toward ``max_vram_gb`` — the partition probe should
+    target the job that will actually execute, not the one the user wrote
+    down. A runnable full matrix minus Tower-72B typically drops peak VRAM
+    from 80 → 48 GB, which is the difference between 'a100 only' and
+    'nice-project works'.
     """
 
     max_vram_gb: int
     scorers: list[dict[str, object]] = field(default_factory=list)
-    """Per-scorer detail: {ref, matched_rule, vram_gb}."""
+    """Per-scorer detail: {ref, rule, vram_gb, tp, skipped}."""
+    skipped_tp: list[str] = field(default_factory=list)
+    """Scorer refs that won't run because tp exceeds the requested --gres."""
 
 
-def infer_vram_need(config_text: str) -> ConfigVRAMNeed:
+def infer_vram_need(config_text: str, gpus: int = 1) -> ConfigVRAMNeed:
     """Scan a run config's ``ref:`` entries and compute the max VRAM peak.
 
-    Returns a default of ``DEFAULT_VRAM_GB`` if no scorer matches a VRAM
-    hint — those are all small COMET / sacrebleu metrics.
+    ``gpus`` is the ``--gres=gpu:N`` the job would be submitted with.
+    Scorers whose inferred ``tp`` exceeds this are recorded in
+    ``skipped_tp`` and excluded from ``max_vram_gb`` — the runner skips
+    them at load time anyway, so they shouldn't dictate which partition
+    the job targets.
+
+    Returns a default of ``DEFAULT_VRAM_GB`` if no runnable scorer matches
+    a VRAM hint — those are all small COMET / sacrebleu metrics.
     """
     refs = re.findall(
         r"^\s*-\s*ref:\s*(\S+)", config_text, flags=re.MULTILINE
     )
     max_vram = DEFAULT_VRAM_GB
     scorers: list[dict[str, object]] = []
+    skipped_tp: list[str] = []
     for ref in refs:
-        vram, rule = DEFAULT_VRAM_GB, "default (≤8 GB)"
-        for pat, gb, label in VRAM_HINTS_GB:
+        vram, tp, rule = DEFAULT_VRAM_GB, 1, "default (≤8 GB)"
+        for pat, gb, t, label in VRAM_HINTS_GB:
             if pat.search(ref):
-                vram, rule = gb, label
+                vram, tp, rule = gb, t, label
                 break
-        scorers.append({"ref": ref, "rule": rule, "vram_gb": vram})
+        skipped = tp > gpus
+        scorers.append({
+            "ref": ref,
+            "rule": rule,
+            "vram_gb": vram,
+            "tp": tp,
+            "skipped": skipped,
+        })
+        if skipped:
+            skipped_tp.append(ref)
+            continue
         if vram > max_vram:
             max_vram = vram
-    return ConfigVRAMNeed(max_vram_gb=max_vram, scorers=scorers)
+    return ConfigVRAMNeed(
+        max_vram_gb=max_vram,
+        scorers=scorers,
+        skipped_tp=skipped_tp,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +420,16 @@ class Partition:
     gpus_alloc: int = 0
     gpu_types: list[str] = field(default_factory=list)
     max_vram_gb: int = 0
+    # The GPU type that produced ``max_vram_gb``. For mixed-hardware
+    # partitions (e.g. cogvis-project has both nvidia_geforce_rtx_3090 and
+    # nvidia_rtx_a5000) this is the card we're actually reporting VRAM
+    # for — NOT just the first-seen type, which can mislead when the max
+    # and the first-seen disagree.
+    max_vram_gpu_type: str = ""
+    # Types whose VRAM we couldn't identify. Used to flag partitions
+    # whose capacity is ambiguous so the user can verify manually rather
+    # than inheriting a blanket READY.
+    unknown_gpu_types: list[str] = field(default_factory=list)
     max_mem_mb: int = 0
     max_cpus: int = 0
     # Largest GPU count on any single node in the partition — this is the
@@ -373,7 +444,25 @@ class Partition:
 
     @property
     def dominant_gpu_type(self) -> str:
+        """The GPU type to display alongside ``max_vram_gb``.
+
+        Prefers the type that actually produced ``max_vram_gb`` (so the
+        ``type`` and ``vram`` columns in the survey table always
+        correlate). Falls back to the first-seen type on partitions where
+        NO GPU type is recognised, so the user still sees what's there.
+        """
+        if self.max_vram_gpu_type:
+            return self.max_vram_gpu_type
         return self.gpu_types[0] if self.gpu_types else ""
+
+    @property
+    def has_mixed_gpu_types(self) -> bool:
+        return len(self.gpu_types) > 1
+
+    @property
+    def vram_known(self) -> bool:
+        """True iff at least one GPU type on the partition is in our map."""
+        return self.max_vram_gb > 0
 
 
 def aggregate_partitions(nodes: list[Node]) -> dict[str, Partition]:
@@ -403,6 +492,13 @@ def aggregate_partitions(nodes: list[Node]) -> dict[str, Partition]:
             v = vram_for_gpu_type(n.gpu_type)
             if v > part.max_vram_gb:
                 part.max_vram_gb = v
+                part.max_vram_gpu_type = n.gpu_type
+            # Track unknowns separately — helps render_table flag partitions
+            # whose VRAM can't be verified (A5000 / Quadro RTX 5000 / etc.
+            # were added post-hoc after a real cluster run surfaced the gap;
+            # this list is the "what did we miss" signal for next time).
+            if n.gpu_type and v == 0 and n.gpu_type not in part.unknown_gpu_types:
+                part.unknown_gpu_types.append(n.gpu_type)
             if n.realmemory_mb > part.max_mem_mb:
                 part.max_mem_mb = n.realmemory_mb
             if n.cpus > part.max_cpus:
@@ -483,19 +579,26 @@ class FitStatus:
       matter how long we wait.
     - ``has_capacity_now``: at least ``request.gpus`` GPUs are free on
       some usable node in the partition RIGHT NOW.
+    - ``vram_known``: we have VRAM data for at least one GPU type on the
+      partition. When False, the partition gets UNKNOWN-VRAM status in
+      the survey table and is not recommended as an alternative — we
+      can't stand behind it without verifying.
     """
 
     partition: str
     shape_ok: bool
     has_capacity_now: bool
+    vram_known: bool = True
     reasons: list[str] = field(default_factory=list)
 
     def status_word(self) -> str:
         if not self.shape_ok:
             return "no-fit"
-        if self.has_capacity_now:
-            return "ready"
-        return "contested"
+        if not self.has_capacity_now:
+            return "contested"
+        if not self.vram_known:
+            return "unknown-vram"
+        return "ready"
 
 
 def check_fit(part: Partition, req: Request) -> FitStatus:
@@ -537,10 +640,15 @@ def check_fit(part: Partition, req: Request) -> FitStatus:
     # Approximate using partition-wide free count (good enough; submit
     # attempts a real fit at sbatch time anyway).
     has_capacity_now = shape_ok and part.gpus_free >= req.gpus
+    # VRAM verifiable iff we know VRAM for at least one type AND there's
+    # no unknown type that could under/over-shoot the reported max. If
+    # some nodes have unknown VRAM, we can't promise the max is real.
+    vram_known = part.vram_known and not part.unknown_gpu_types
     return FitStatus(
         partition=part.name,
         shape_ok=shape_ok,
         has_capacity_now=has_capacity_now,
+        vram_known=vram_known,
         reasons=reasons,
     )
 
@@ -576,20 +684,27 @@ def render_table(
         f"{req.gpus} GPU, need ≥{req.vram_need_gb} GB VRAM){c['reset']}"
     )
     header = (
-        f"  {'partition':<18}  {'status':<10}  {'gpus (free/total)':<18}  "
-        f"{'type':<18}  {'vram':<6}"
+        f"  {'partition':<18}  {'status':<13}  {'gpus (free/total)':<18}  "
+        f"{'type':<22}  {'vram':<6}"
     )
     lines.append(header)
     lines.append("  " + "-" * (len(header) - 2))
-    # Sort: target first, then ready > contested > no-fit, then by free GPUs desc.
+    # Sort: target first, then ready > contested > unknown-vram > no-fit,
+    # then by free GPUs desc.
     def sort_key(p: Partition) -> tuple[int, int, int]:
         fit = fits.get(p.name)
         if p.name == req.partition:
             return (0, 0, 0)
         if fit is None:
-            return (3, 0, 0)
-        rank = {"ready": 1, "contested": 2, "no-fit": 3}[fit.status_word()]
+            return (4, 0, 0)
+        rank = {
+            "ready": 1,
+            "contested": 2,
+            "unknown-vram": 3,
+            "no-fit": 4,
+        }[fit.status_word()]
         return (rank, -p.gpus_free, 0)
+    has_mixed_any = False
     for p in sorted(partitions, key=sort_key):
         fit = fits.get(p.name)
         status = fit.status_word() if fit else "?"
@@ -599,6 +714,9 @@ def render_table(
         elif status == "contested":
             colour_code = c["yel"]
             tag = "CONTESTED"
+        elif status == "unknown-vram":
+            colour_code = c["yel"]
+            tag = "UNKNOWN-VRAM"
         elif status == "no-fit":
             colour_code = c["red"]
             tag = "NO-FIT"
@@ -608,10 +726,20 @@ def render_table(
         mark = " *" if p.name == req.partition else "  "
         gpu_cell = f"{p.gpus_free}/{p.gpus_total}"
         gpu_type = p.dominant_gpu_type or "—"
+        # Suffix with '+' to signal mixed-hardware partition (the displayed
+        # type is the one that produced max_vram_gb; other node types exist).
+        if p.has_mixed_gpu_types:
+            gpu_type = f"{gpu_type}+"
+            has_mixed_any = True
         vram = f"{p.max_vram_gb}G" if p.max_vram_gb else "—"
         lines.append(
-            f"{mark}{p.name:<18}  {colour_code}{tag:<10}{c['reset']}  "
-            f"{gpu_cell:<18}  {gpu_type:<18}  {vram:<6}"
+            f"{mark}{p.name:<18}  {colour_code}{tag:<13}{c['reset']}  "
+            f"{gpu_cell:<18}  {gpu_type:<22}  {vram:<6}"
+        )
+    if has_mixed_any:
+        lines.append(
+            f"  {c['dim']}'+' = mixed-hardware partition (vram/type shown "
+            f"for the fattest card){c['reset']}"
         )
     return "\n".join(lines)
 
@@ -625,15 +753,18 @@ def pick_recommended(
 
     Prefers partitions with the SMALLEST fitting VRAM — don't send a
     Kiwi-DA job to a100 when nice-project has capacity. Among ties
-    prefers the one with MORE free GPUs.
+    prefers the one with MORE free GPUs. Partitions with UNKNOWN-VRAM
+    status are NOT recommended: we can't promise they fit without
+    verifying, and a blind recommendation is worse than none.
     """
     target_fit = fits.get(req.partition)
-    if target_fit and target_fit.has_capacity_now:
+    if target_fit and target_fit.has_capacity_now and target_fit.vram_known:
         return None
     candidates = [
         p for p in partitions
         if p.name != req.partition
         and fits[p.name].has_capacity_now
+        and fits[p.name].vram_known
         and (not req.vram_need_gb or p.max_vram_gb >= req.vram_need_gb)
     ]
     if not candidates:
@@ -686,17 +817,24 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="disable ANSI colour in the table")
     args = p.parse_args(argv)
 
+    # Slurm-script defaults — parsed FIRST because the requested --gres=gpu:N
+    # drives the tp-based scorer filter in infer_vram_need below. Without
+    # this the probe over-estimates VRAM need for any full-matrix config
+    # that includes tp>1 models (Tower-72B), and routes every submission
+    # to a100-only partitions.
+    slurm_defaults: dict[str, str] = {}
+    if args.slurm_script and args.slurm_script.is_file():
+        slurm_defaults = parse_slurm_header(args.slurm_script.read_text())
+    gpus_for_inference = args.gpus or int(slurm_defaults.get("gpus", "1"))
+
     # VRAM need from config.
     vram_need_gb = DEFAULT_VRAM_GB
     vram_detail: Optional[ConfigVRAMNeed] = None
     if args.config and args.config.is_file():
-        vram_detail = infer_vram_need(args.config.read_text())
+        vram_detail = infer_vram_need(
+            args.config.read_text(), gpus=gpus_for_inference,
+        )
         vram_need_gb = vram_detail.max_vram_gb
-
-    # Slurm-script defaults.
-    slurm_defaults: dict[str, str] = {}
-    if args.slurm_script and args.slurm_script.is_file():
-        slurm_defaults = parse_slurm_header(args.slurm_script.read_text())
 
     req = build_request(args, slurm_defaults, vram_need_gb)
 
@@ -762,20 +900,40 @@ def main(argv: Optional[list[str]] = None) -> int:
         use_colour = (not args.no_colour) and sys.stdout.isatty()
         print(render_table(partitions, fits, req, colour=use_colour))
         if vram_detail:
+            runnable = [s for s in vram_detail.scorers if not s["skipped"]]
             print()
-            print(f"  inferred VRAM need: {vram_need_gb} GB "
-                  f"(from {len(vram_detail.scorers)} scorers; "
-                  f"peak = {vram_need_gb} GB because scorers run sequentially)")
+            print(
+                f"  inferred VRAM need: {vram_need_gb} GB "
+                f"(from {len(runnable)}/{len(vram_detail.scorers)} scorers "
+                f"runnable at --gres=gpu:{req.gpus}; peak = {vram_need_gb} GB "
+                f"because scorers run sequentially)"
+            )
+            if vram_detail.skipped_tp:
+                skipped_refs = ", ".join(vram_detail.skipped_tp)
+                print(
+                    f"  skipped at tp>--gres=gpu:{req.gpus}: {skipped_refs} — "
+                    f"runner will skip these at load time; re-submit with more "
+                    f"GPUs if you need them."
+                )
+        # Flag partitions whose VRAM we couldn't verify so the user can
+        # check the GPU type manually rather than trusting a blank READY.
+        unknown_parts = [p for p in partitions if p.unknown_gpu_types]
+        if unknown_parts:
+            print()
+            for p in unknown_parts:
+                types = ", ".join(p.unknown_gpu_types)
+                print(
+                    f"  note: {p.name} has unmapped GPU type(s): {types} — "
+                    f"verify VRAM with `scontrol show node <node>` before "
+                    f"submitting here."
+                )
         print()
         tf = target_fit
-        if tf.has_capacity_now:
-            print(f"  → {req.partition}: READY — {sum(1 for _ in [0])} "
-                  f"proceed with pre-flight.")
-        elif not tf.shape_ok:
+        if not tf.shape_ok:
             print(f"  → {req.partition}: NO-FIT — " + "; ".join(tf.reasons))
             if recommended:
                 print(f"    Try: scripts/submit.sh <config> -p {recommended}")
-        else:
+        elif not tf.has_capacity_now:
             print(f"  → {req.partition}: CONTESTED — shape fits but 0 "
                   f"free GPUs right now.")
             if recommended:
@@ -784,6 +942,17 @@ def main(argv: Optional[list[str]] = None) -> int:
             else:
                 print("    No ready alternative; sbatch would reject too. "
                       "Wait for the queue to drain.")
+        elif not tf.vram_known:
+            print(
+                f"  → {req.partition}: UNKNOWN-VRAM — partition has GPU "
+                f"types we don't have a VRAM entry for. shape-ok, GPUs "
+                f"free, but we can't promise the job fits."
+            )
+            if recommended:
+                print(f"    Safer alternative: "
+                      f"scripts/submit.sh <config> -p {recommended}")
+        else:
+            print(f"  → {req.partition}: READY — proceed with pre-flight.")
 
     # Exit code policy.
     if not target_fit.shape_ok:
