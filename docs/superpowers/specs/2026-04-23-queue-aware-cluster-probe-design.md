@@ -256,8 +256,10 @@ probe input: (config.yaml, --target-partition, --gpus, --tee-alternatives)
   8. exit:
        0  target VRAM-fits (may still be sub-optimal vs. recommender)
        2  target NO-FIT (but at least one other partition fits)
-       3  target is blocklisted
+       3  probe itself failed (scontrol missing or unparseable) —
+          preserved from the original probe for submit.sh back-compat
        4  no partition can fit the job at the requested gpus count
+       5  target partition is blocklisted
 
 submit.sh preflight step [5/6]:
   - probe --tee-alternatives=$TMP/alts.tsv
