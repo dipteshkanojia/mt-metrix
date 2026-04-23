@@ -58,15 +58,27 @@
 #   Tower-13B (26 GB fp16 + tokeniser + KV):                ~50 GB peak
 #   Tower-72B:                                              ~180 GB peak
 #
-# PARTITION-SPECIFIC CEILINGS (SLURM rejects oversubscribing these):
-#   nice-project (aisurrey35):   128 GB host RAM total.  --mem=128G is MAX.
-#   rtx8000 / rtx_a6000_risk /   typically 128-256 GB depending on node.
-#     l40s_risk / 3090:          check with `scontrol show node <name>`.
-#   a100:                        >=256 GB host RAM on all a100 nodes.
-#   debug:                       check the specific node.
-# Requesting more than the node has triggers ``allocation failure:
-# Requested node configuration is not available`` at `sbatch --test-only`
-# time. The submit.sh wrapper surfaces that as FAIL before submission.
+# PARTITION-SPECIFIC CEILINGS (SLURM rejects oversubscribing these at
+# `sbatch --test-only` with ``allocation failure: Requested node
+# configuration is not available``). Verify live with
+# ``scontrol show node <nodename> | grep -E 'RealMemory|CfgTRES'``:
+#
+#   nice-project (aisurrey35):
+#     RealMemory=128000 MB physical, MemSpecLimit=8000 MB reserved for
+#     OS, so SLURM-schedulable mem caps at CfgTRES=125G. Any --mem
+#     >= 126G is rejected. Our default --mem=120G leaves a small buffer.
+#     GRES = 2× L40s; --gres=gpu:1 or gpu:2 both allowed, gpu:N>2 rejected.
+#     CPUs = 14 schedulable (16 physical, 2 reserved via CoreSpecCount).
+#
+#   rtx8000 / rtx_a6000_risk / l40s_risk / 3090:
+#     typically 125-256 GB schedulable depending on node; check with
+#     ``scontrol show node <name>`` before overriding --mem upward.
+#
+#   a100:  >=256 GB host RAM on all a100 nodes; --mem=256G is safe.
+#   debug: check the specific node.
+#
+# The submit.sh wrapper runs ``sbatch --test-only`` as pre-flight #5 so
+# you see the rejection before any job is actually queued.
 #
 # Plan per scorer family given the ceilings above:
 #   Any single scorer on nice-project:      128G in-file default is correct
@@ -101,8 +113,8 @@
 
 #SBATCH --partition=nice-project     # NICE-group dedicated 2× L40s 48 GB; override with -p on CLI
 #SBATCH --gres=gpu:1                 # override with --gres=gpu:N (N=4 only for Tower-72B on a100)
-#SBATCH --cpus-per-task=8            # dataloader workers
-#SBATCH --mem=128G                   # = nice-project node ceiling; a100 can go to 256G via --mem override
+#SBATCH --cpus-per-task=8            # dataloader workers; nice-project schedulable is 14 cores
+#SBATCH --mem=120G                   # nice-project CfgTRES caps at 125G; 120G leaves OS buffer. a100 can take --mem=256G.
 #SBATCH --time=24:00:00              # 24h; most runs finish in <4h
 #SBATCH --output=logs/slurm_%j_%x.out
 #SBATCH --error=logs/slurm_%j_%x.err

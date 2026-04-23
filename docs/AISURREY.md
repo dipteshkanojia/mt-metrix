@@ -238,10 +238,14 @@ mt-metrix correlate --run $SCRATCH/outputs/<run_id>
   `-p a100 --mem=256G`).
 - **`allocation failure: Requested node configuration is not available`**
   at `sbatch --test-only` time → you asked for more resources than the
-  target partition's largest node physically has. Common trap:
-  `--mem=256G` on `nice-project`, which caps at 128 GB. Drop the
-  override (the in-file default is correct for nice-project) or switch
-  partition with `-p a100`.
+  target partition's largest node can schedule. On `nice-project`
+  (aisurrey35): RealMemory=128 GB but MemSpecLimit reserves 8 GB for
+  the OS, so `CfgTRES=mem=125G` is the hard schedulable ceiling.
+  Anything over 125G — including the old `--mem=128G` default — is
+  rejected. The in-file default is now `--mem=120G`. Check a node's
+  live ceiling with `scontrol show node <name> | grep CfgTRES`. For
+  workloads that genuinely need >125 GB host RAM, switch partition
+  with `-p a100 --mem=256G`.
 - **`ImportError: vllm`** → installed without `[tower]` extra. Run
   `pip install -e ".[tower]"` or remove Tower scorers from the run.
 - **Job stuck in `PD` forever** → `a100` queue is full. `sinfo -p a100`
