@@ -865,11 +865,15 @@ def test_pick_recommended_returns_at_most_three_alternatives(probe):
 
 
 # ---------------------------------------------------------------------------
-# Old pick_recommended behaviour that the new scoring intentionally changes
-# is updated here: the legacy tests (test_pick_recommended_when_target_contested,
-# test_pick_recommended_prefers_smallest_fitting, test_pick_recommended_skips_unknown_vram,
-# test_pick_recommended_none_when_target_ready) now expect the tuple return
-# shape and tier-driven outcome.
+# The legacy recommender tests that encoded the old smallest-VRAM-first
+# behaviour have been split: three were updated to use the new tuple
+# return shape and tier-driven outcome
+# (test_pick_recommended_when_target_contested,
+# test_pick_recommended_skips_unknown_vram,
+# test_pick_recommended_none_when_target_ready), and one was deleted
+# (test_pick_recommended_prefers_smallest_fitting) because its premise
+# — a 3090 winning for an 8 GB job — no longer holds now that
+# nice-project is tier 1.
 # ---------------------------------------------------------------------------
 
 

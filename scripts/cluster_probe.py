@@ -149,6 +149,19 @@ PARTITION_TIER: dict[str, int] = {
 
 DEFAULT_TIER = 3
 
+# Penalty added to a100's effective tier when ``_a100_penalty_applies``
+# returns True. Value chosen so that a100's effective tier (5 + 4 = 9)
+# sits strictly behind every other tier even as the tier table grows.
+A100_TIER_PENALTY = 4
+
+# Max alternatives returned by ``pick_recommended``. submit.sh's
+# interactive prompt caps at 3 choices; larger lists overwhelm users.
+MAX_ALTERNATIVES = 3
+
+# Sort-key proxy for "worse than any finite wait" — used when
+# ``estimate_wait_s`` returns None (squeue info incomplete).
+_WAIT_UNKNOWN = 10**12
+
 
 def is_blocklisted(partition: str) -> bool:
     return partition in PARTITIONS_BLOCKLIST
@@ -1037,9 +1050,6 @@ def _a100_penalty_applies(
     return False
 
 
-_WAIT_UNKNOWN = 10**12  # sort key proxy for "worse than any finite wait"
-
-
 def pick_recommended(
     partitions: list["Partition"],
     fits: dict[str, "FitStatus"],
@@ -1081,16 +1091,26 @@ def pick_recommended(
     if not eligible:
         return None, []
 
+    # Cache ``estimate_wait_s`` once per eligible partition. The scorer,
+    # the reason string, and the Alternative.wait_s field all reuse this
+    # mapping so ``estimate_wait_s`` runs at most once per partition.
+    # A missing key means "ready now" (wait is 0); a present ``None``
+    # value means squeue info was incomplete (callers render ``?``).
+    wait_estimates: dict[str, Optional[int]] = {}
+    for p in eligible:
+        if not fits[p.name].has_capacity_now:
+            wait_estimates[p.name] = estimate_wait_s(p, req.gpus)
+
     def score(p: "Partition") -> tuple[int, int, int, int, int]:
         fit = fits[p.name]
         ready_now = fit.has_capacity_now
         ready_now_rank = 0 if ready_now else 1
         tier = partition_tier(p.name)
-        a100_bonus = 4 if (p.name == "a100" and a100_penalty_on) else 0
+        a100_bonus = A100_TIER_PENALTY if (p.name == "a100" and a100_penalty_on) else 0
         if ready_now:
             wait_key = 0
         else:
-            w = estimate_wait_s(p, req.gpus)
+            w = wait_estimates[p.name]
             wait_key = _WAIT_UNKNOWN if w is None else w
         vram_waste = max(p.max_vram_gb - req.vram_need_gb, 0)
         return (ready_now_rank, tier + a100_bonus, wait_key, vram_waste, -p.gpus_free)
@@ -1103,18 +1123,15 @@ def pick_recommended(
             if partition_tier(p.name) == 1:
                 return "free now, group partition"
             return "free now"
-        w = estimate_wait_s(p, req.gpus)
+        w = wait_estimates[p.name]
         if w is None:
             return "no immediate capacity; wait unknown"
         return f"no immediate capacity; est. wait {w // 60} min"
 
     alternatives: list[Alternative] = []
-    for p in ranked[:3]:
+    for p in ranked[:MAX_ALTERNATIVES]:
         fit = fits[p.name]
-        if fit.has_capacity_now:
-            wait_s: Optional[int] = 0
-        else:
-            wait_s = estimate_wait_s(p, req.gpus)
+        wait_s: Optional[int] = 0 if fit.has_capacity_now else wait_estimates[p.name]
         alternatives.append(
             Alternative(
                 partition=p.name,
