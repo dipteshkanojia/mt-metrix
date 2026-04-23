@@ -38,6 +38,10 @@ Exit codes:
         alternatives exist that fit. submit.sh uses this to warn loudly.
     3 = probe itself failed (scontrol/sinfo unavailable, unparseable output).
         submit.sh should fall through to the existing --test-only path.
+    4 = no partition can fit the shape at the requested --gres=gpu:N;
+        user's config is broken regardless of target.
+    5 = target partition is blocklisted (hard reject); user must pick a
+        different partition. Survey still printed to stderr.
 """
 from __future__ import annotations
 
@@ -1263,7 +1267,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if is_blocklisted(req.partition):
         msg = (
             f"partition '{req.partition}' is in the cluster-probe "
-            f"blocklist (belongs to another faculty/group). Pick a "
+            f"blocklist (belongs to another group). Pick a "
             f"different partition."
         )
         if args.json:
