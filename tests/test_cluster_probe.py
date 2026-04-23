@@ -1417,3 +1417,63 @@ def test_main_calls_run_squeue(probe, monkeypatch, capsys, tmp_path):
         "--no-colour",
     ])
     assert called["n"] == 1
+
+
+def test_main_no_tee_alternatives_skips_write(probe, monkeypatch, tmp_path):
+    """Without --tee-alternatives, main() must not write any TSV file.
+
+    Guards against a future refactor that accidentally hard-codes a default
+    sidecar path — submit.sh relies on "flag absent → no sidecar".
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(probe, "run_scontrol_show_node", lambda: SCONTROL_FIXTURE)
+    monkeypatch.setattr(probe, "run_squeue", lambda: "")
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("scorers:\n  - ref: comet/wmt22-cometkiwi-da\n")
+    rc = probe.main([
+        "--config", str(cfg),
+        "--partition", "a100", "--gpus", "1",
+        "--slurm-script", "/dev/null",
+        "--no-colour",
+    ])
+    assert rc == 0
+    tsv_files = list(tmp_path.rglob("*.tsv"))
+    assert tsv_files == [], f"unexpected TSV files: {tsv_files}"
+
+
+def test_main_tee_alternatives_oserror_is_non_fatal(probe, monkeypatch, capsys, tmp_path):
+    """OSError during --tee-alternatives write must be non-fatal.
+
+    main() should return the normal exit code and emit a warning to stderr —
+    the probe's core value (capacity recommendation, exit-code semantics for
+    submit.sh) is independent of whether the TSV sidecar was written.
+    """
+    monkeypatch.setattr(probe, "run_scontrol_show_node", lambda: SCONTROL_FIXTURE)
+    monkeypatch.setattr(probe, "run_squeue", lambda: "")
+
+    # Force OSError on the TSV write by monkeypatching Path.open to raise
+    # when called on any .tsv path. Simulates out-of-space / read-only FS.
+    import pathlib
+    real_open = pathlib.Path.open
+    def raising_open(self, *args, **kwargs):
+        if str(self).endswith(".tsv"):
+            raise OSError("disk full (simulated)")
+        return real_open(self, *args, **kwargs)
+    monkeypatch.setattr(pathlib.Path, "open", raising_open)
+
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("scorers:\n  - ref: comet/wmt22-cometkiwi-da\n")
+    tee = tmp_path / "alts.tsv"
+    rc = probe.main([
+        "--config", str(cfg),
+        "--partition", "a100", "--gpus", "1",
+        "--slurm-script", "/dev/null",
+        "--tee-alternatives", str(tee),
+        "--no-colour",
+    ])
+    assert rc == 0  # happy path must survive sidecar failure
+    captured = capsys.readouterr()
+    assert "could not write" in captured.err
+    assert "alts.tsv" in captured.err
+    # And no TSV should have been created (the write was the thing that failed).
+    assert not tee.exists()
