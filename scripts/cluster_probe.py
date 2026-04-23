@@ -725,6 +725,38 @@ def attach_queue_stats(
         # Ignore COMPLETING/CONFIGURING/CANCELLED etc. — not load-bearing.
 
 
+def estimate_wait_s(
+    partition: "Partition", gpus_requested: int
+) -> Optional[int]:
+    """Estimate when ``gpus_requested`` GPUs will free up.
+
+    Returns:
+      - ``0`` if the partition already has that many GPUs free.
+      - An integer (seconds) equal to the ``deficit``-th-smallest
+        ``time_left_s`` across running jobs with known durations, where
+        ``deficit = gpus_requested - gpus_free + pending_gpu_demand``.
+        ``pending_gpu_demand`` is a conservative proxy for "jobs ahead
+        of us in the queue" — squeue doesn't expose priority ordering
+        reliably.
+      - ``None`` if we can't tell because fewer than ``deficit`` running
+        jobs have a known finite ``time_left_s`` (or none at all).
+        Callers (pick_recommended) treat ``None`` as worse than any
+        finite wait.
+    """
+    gpus_free = partition.gpus_free
+    deficit = gpus_requested - gpus_free + partition.pending_gpu_demand
+    if deficit <= 0:
+        return 0
+    known_finite = sorted(
+        j.time_left_s for j in partition.running_jobs
+        if j.time_left_s is not None
+    )
+    if len(known_finite) < deficit:
+        return None
+    # 0-indexed: we need the deficit-th to finish, which is index deficit-1.
+    return known_finite[deficit - 1]
+
+
 # ---------------------------------------------------------------------------
 # Request parsing — read the requested partition / gpu count / mem from
 # the slurm script header + any CLI overrides passed through.

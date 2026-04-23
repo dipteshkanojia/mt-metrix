@@ -17,6 +17,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Optional
 
 import pytest
 
@@ -1031,3 +1032,96 @@ def test_aggregate_partitions_defaults_queue_fields(probe):
     assert p.pending_jobs == []
     assert p.earliest_free_s is None
     assert p.pending_gpu_demand == 0
+
+
+# ---------------------------------------------------------------------------
+# estimate_wait_s
+# ---------------------------------------------------------------------------
+
+def _make_partition(probe, **kw):
+    """Construct a Partition for wait-time unit tests without scontrol."""
+    p = probe.Partition(name=kw.pop("name", "test"))
+    p.gpus_total = kw.pop("gpus_total", 0)
+    p.gpus_alloc = kw.pop("gpus_alloc", 0)
+    p.pending_gpu_demand = kw.pop("pending_gpu_demand", 0)
+    p.running_jobs = kw.pop("running_jobs", [])
+    for leftover in kw:  # pragma: no cover — typo guard
+        raise TypeError(f"unexpected kwarg: {leftover}")
+    return p
+
+
+def _job_with_time_left(probe, t_left: Optional[int], gpus: int = 1):
+    return probe.Job(
+        job_id="x", partition="test", state="RUNNING",
+        time_left_s=t_left, time_used_s=0,
+        num_gpus=gpus, reason="None", user="u",
+    )
+
+
+def test_estimate_wait_s_ready_now_returns_zero(probe):
+    p = _make_partition(probe, gpus_total=4, gpus_alloc=1)   # 3 free
+    assert probe.estimate_wait_s(p, gpus_requested=2) == 0
+
+
+def test_estimate_wait_s_single_running_blocks(probe):
+    """All GPUs allocated, 1 running job with 1h left, request 1 GPU."""
+    p = _make_partition(
+        probe,
+        gpus_total=1, gpus_alloc=1,
+        running_jobs=[_job_with_time_left(probe, 3600)],
+    )
+    assert probe.estimate_wait_s(p, gpus_requested=1) == 3600
+
+
+def test_estimate_wait_s_takes_nth_smallest(probe):
+    """Need 2 GPUs, 3 running jobs (30m, 1h, 2h left) holding all 3 GPUs.
+    Deficit=2 means we need 2 of them to finish; the 2nd-shortest is 1h.
+    """
+    p = _make_partition(
+        probe,
+        gpus_total=3, gpus_alloc=3,
+        running_jobs=[
+            _job_with_time_left(probe, 1800),
+            _job_with_time_left(probe, 3600),
+            _job_with_time_left(probe, 7200),
+        ],
+    )
+    assert probe.estimate_wait_s(p, gpus_requested=2) == 3600
+
+
+def test_estimate_wait_s_pending_demand_extends_wait(probe):
+    """Pending GPU demand counts as 'ahead of us' even if priority would
+    actually sort differently — conservative proxy."""
+    p = _make_partition(
+        probe,
+        gpus_total=1, gpus_alloc=1,
+        pending_gpu_demand=1,
+        running_jobs=[
+            _job_with_time_left(probe, 1800),
+            _job_with_time_left(probe, 3600),
+        ],
+    )
+    # Deficit = 1 - 0 + 1 = 2 → 2nd-shortest running (3600).
+    assert probe.estimate_wait_s(p, gpus_requested=1) == 3600
+
+
+def test_estimate_wait_s_unknown_when_too_few_known(probe):
+    """3 running jobs but only 1 has a known TimeLeft → deficit=2 → None."""
+    p = _make_partition(
+        probe,
+        gpus_total=3, gpus_alloc=3,
+        running_jobs=[
+            _job_with_time_left(probe, 1800),
+            _job_with_time_left(probe, None),
+            _job_with_time_left(probe, None),
+        ],
+    )
+    assert probe.estimate_wait_s(p, gpus_requested=2) is None
+
+
+def test_estimate_wait_s_unknown_when_no_running_jobs(probe):
+    """All GPUs allocated but attach_queue_stats couldn't read squeue →
+    running_jobs empty. We can't estimate; return None rather than lie
+    with 0."""
+    p = _make_partition(probe, gpus_total=1, gpus_alloc=1)
+    assert probe.estimate_wait_s(p, gpus_requested=1) is None
