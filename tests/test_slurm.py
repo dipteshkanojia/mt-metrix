@@ -230,3 +230,56 @@ def test_submit_sh_does_sbatch_test_only():
 def test_submit_sh_warns_above_four_gpus():
     txt = resolve_submit_script(REPO_ROOT).read_text()
     assert "soft cap" in txt.lower() or "4-GPU" in txt or "4 GPUs" in txt
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight #5 soft-warn path (transient resource contention vs. genuine
+# shape violation). Added 2026-04-23 after nice-project's sole node had both
+# L40s allocated and submit.sh hard-failed on a job that was only contended,
+# not shape-invalid.
+# ---------------------------------------------------------------------------
+
+def test_submit_sh_distinguishes_transient_from_shape_error():
+    """Wrapper must branch on the error message so transient contention
+    doesn't block a submission that's actually fine shape-wise."""
+    txt = resolve_submit_script(REPO_ROOT).read_text()
+    # The grep on SLURM's error phrasing.
+    assert "Requested node configuration is not available" in txt, (
+        "pre-flight #5 must detect the transient-contention error text"
+    )
+    # The shape-vs-transient branching logic's own keywords.
+    assert "genuine shape violation" in txt, (
+        "shape-violation branch must self-label so the red path is obvious"
+    )
+    assert "transient" in txt.lower(), (
+        "transient branch must self-label so the yellow path is obvious"
+    )
+    # The user escape hatch.
+    assert "Ctrl-C within 5s" in txt, (
+        "transient branch must give the user 5s to abort before proceeding"
+    )
+
+
+def test_submit_sh_parses_mem_suffixes():
+    """The _parse_mem_mb helper must handle the suffixes SLURM accepts."""
+    txt = resolve_submit_script(REPO_ROOT).read_text()
+    # Helper must be defined and cover G/M/T/K plus bare numbers.
+    assert "_parse_mem_mb()" in txt
+    for suffix in ["T", "G", "M", "K"]:
+        assert f"[0-9]+){suffix}" in txt, f"--mem parser missing {suffix} suffix"
+
+
+def test_submit_sh_queries_partition_ceiling_before_failing():
+    """Shape check must actually cross-reference the partition's real
+    per-node ceiling, not just accept or reject blindly."""
+    txt = resolve_submit_script(REPO_ROOT).read_text()
+    # Must read sinfo for RealMemory / CPUs / Gres per node.
+    assert "sinfo -h -p \"$PARTITION\" -N -o '%m'" in txt, (
+        "shape check must ask sinfo for largest-node RealMemory"
+    )
+    assert "sinfo   -h -p \"$PARTITION\" -N -o '%c'" in txt, (
+        "shape check must ask sinfo for largest-node CPU count"
+    )
+    assert "sinfo   -h -p \"$PARTITION\" -N -o '%G'" in txt, (
+        "shape check must ask sinfo for largest-node Gres"
+    )

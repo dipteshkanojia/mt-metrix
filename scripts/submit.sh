@@ -77,6 +77,20 @@ yel()   { printf '\033[33m%s\033[0m\n' "$*" >&2; }
 fail() { red "FAIL: $*"; exit 1; }
 ok()   { green "  ok: $*"; }
 
+# Convert a SLURM --mem value (e.g. 120G, 256G, 64000, 1T) into megabytes.
+# Empty input returns empty string. Unrecognised suffix returns empty.
+# SLURM's default unit is MB when no suffix is given.
+_parse_mem_mb() {
+    local raw="${1:-}"
+    [[ -z "$raw" ]] && return 0
+    if   [[ "$raw" =~ ^([0-9]+)T$ ]]; then echo "$(( ${BASH_REMATCH[1]} * 1024 * 1024 ))"
+    elif [[ "$raw" =~ ^([0-9]+)G$ ]]; then echo "$(( ${BASH_REMATCH[1]} * 1024 ))"
+    elif [[ "$raw" =~ ^([0-9]+)M$ ]]; then echo "${BASH_REMATCH[1]}"
+    elif [[ "$raw" =~ ^([0-9]+)K$ ]]; then echo "$(( ${BASH_REMATCH[1]} / 1024 ))"
+    elif [[ "$raw" =~ ^([0-9]+)$  ]]; then echo "${BASH_REMATCH[1]}"
+    fi
+}
+
 # ---------------------------------------------------------------- check 1: config + slurm script exist
 
 echo "[1/5] config file check..."
@@ -164,16 +178,112 @@ elif [[ -n "$GPU_COUNT" ]] && [[ "$GPU_COUNT" =~ ^[0-9]+$ ]]; then
 fi
 
 # ---------------------------------------------------------------- check 5: sbatch --test-only
+#
+# sbatch --test-only green-lights only when the job could start IMMEDIATELY
+# on some node in the target partition. On a single-node partition (e.g.
+# nice-project = aisurrey35) that's frequently "no" even when the shape is
+# fine, because all GPUs on the one node are currently allocated. We need
+# to tell three outcomes apart:
+#
+#   (a) accepted                           → ok, submit
+#   (b) transient: no free slot right now  → warn loudly, still submit
+#                                            (sbatch will queue the job PD
+#                                            and start when a slot frees)
+#   (c) genuine shape violation            → fail hard, user must fix
+#
+# SLURM's error text is ambiguous between (b) and (c): both can print
+# "Requested node configuration is not available". We disambiguate by
+# reading CfgTRES for the partition's largest node and comparing against
+# what the user is asking for. If any requested resource (--mem,
+# --cpus-per-task, --gres=gpu:N) genuinely exceeds the node ceiling → (c).
+# Otherwise it's (b), warn and continue.
 
 echo "[5/5] sbatch --test-only (validates partition/gres/mem/time vs. live cluster)..."
 if command -v sbatch >/dev/null 2>&1; then
-    if sbatch --test-only --job-name="$JOBNAME" --exclude="$FLAKY_NODE" \
-              "${EXTRA_ARGS[@]}" "$SLURM_SCRIPT" "$CONFIG" >/dev/null 2>&1; then
+    TESTONLY_OUT=$(sbatch --test-only --job-name="$JOBNAME" --exclude="$FLAKY_NODE" \
+                          "${EXTRA_ARGS[@]}" "$SLURM_SCRIPT" "$CONFIG" 2>&1) && TESTONLY_RC=0 || TESTONLY_RC=$?
+    if [[ "$TESTONLY_RC" -eq 0 ]]; then
         ok "dry-run accepted"
+    elif echo "$TESTONLY_OUT" | grep -qiE 'Requested node configuration is not available|Required node not available|Nodes required for job are DOWN, DRAINED'; then
+        # Could be (b) transient contention or (c) genuine shape violation.
+        # Parse the effective request and compare against the partition's
+        # largest CfgTRES to distinguish.
+        REQ_MEM_MB=""
+        REQ_CPUS=""
+        REQ_GPUS=""
+        # From EXTRA_ARGS (CLI overrides win over in-file defaults).
+        for arg in "${EXTRA_ARGS[@]:-}"; do
+            case "$arg" in
+                --mem=*)           REQ_MEM_MB=$(_parse_mem_mb "${arg#--mem=}") ;;
+                --cpus-per-task=*) REQ_CPUS="${arg#--cpus-per-task=}" ;;
+                --gres=gpu:*)      _g="${arg#--gres=gpu:}"; REQ_GPUS="${_g##*:}" ;;
+            esac
+        done
+        # Fall back to the in-file sbatch header for anything the CLI
+        # didn't override.
+        if [[ -z "$REQ_MEM_MB" ]]; then
+            _m=$(awk -F= '/^#SBATCH[[:space:]]+--mem=/{print $2; exit}' "$SLURM_SCRIPT" \
+                   | awk '{print $1}')
+            REQ_MEM_MB=$(_parse_mem_mb "$_m")
+        fi
+        if [[ -z "$REQ_CPUS" ]]; then
+            REQ_CPUS=$(awk -F= '/^#SBATCH[[:space:]]+--cpus-per-task=/{print $2; exit}' \
+                         "$SLURM_SCRIPT" | awk '{print $1}')
+        fi
+        if [[ -z "$REQ_GPUS" ]]; then
+            _g=$(awk -F= '/^#SBATCH[[:space:]]+--gres=gpu:/{print $2; exit}' "$SLURM_SCRIPT" \
+                   | awk '{print $1}')
+            REQ_GPUS="${_g##*:}"
+        fi
+        # Query the partition's max CfgTRES (largest per-node ceiling).
+        # sinfo shape: '%m' = RealMemory MB, '%c' = CPUs, '%G' = gres list.
+        # We take the max RealMemory across nodes in the partition as the
+        # "biggest node" ceiling. It's a safe upper bound: if the request
+        # exceeds this, no node can ever satisfy it.
+        _BIG_MEM_MB=$(sinfo -h -p "$PARTITION" -N -o '%m' 2>/dev/null | sort -n | tail -1)
+        _BIG_CPU=$(sinfo   -h -p "$PARTITION" -N -o '%c' 2>/dev/null | sort -n | tail -1)
+        _BIG_GPU=$(sinfo   -h -p "$PARTITION" -N -o '%G' 2>/dev/null \
+                     | grep -oE 'gpu:[a-zA-Z0-9_]+:[0-9]+|gpu:[0-9]+' \
+                     | grep -oE '[0-9]+$' | sort -n | tail -1)
+        SHAPE_BAD=0
+        SHAPE_REASONS=()
+        if [[ -n "$REQ_MEM_MB" ]] && [[ -n "$_BIG_MEM_MB" ]] \
+             && (( REQ_MEM_MB > _BIG_MEM_MB )); then
+            SHAPE_BAD=1
+            SHAPE_REASONS+=("--mem=${REQ_MEM_MB}M > largest node RealMemory=${_BIG_MEM_MB}M")
+        fi
+        if [[ -n "$REQ_CPUS" ]] && [[ -n "$_BIG_CPU" ]] \
+             && (( REQ_CPUS > _BIG_CPU )); then
+            SHAPE_BAD=1
+            SHAPE_REASONS+=("--cpus-per-task=$REQ_CPUS > largest node CPUs=$_BIG_CPU")
+        fi
+        if [[ -n "$REQ_GPUS" ]] && [[ -n "$_BIG_GPU" ]] \
+             && (( REQ_GPUS > _BIG_GPU )); then
+            SHAPE_BAD=1
+            SHAPE_REASONS+=("--gres=gpu:$REQ_GPUS > largest node GPUs=$_BIG_GPU")
+        fi
+        if [[ "$SHAPE_BAD" -eq 1 ]]; then
+            red "  sbatch --test-only rejected the submission — genuine shape violation:"
+            for reason in "${SHAPE_REASONS[@]}"; do
+                red "    $reason"
+            done
+            red "  raw error: $TESTONLY_OUT"
+            fail "request exceeds the partition's per-node ceilings; fix and retry"
+        else
+            yel "  warn: sbatch --test-only couldn't place this job RIGHT NOW:"
+            yel "        $TESTONLY_OUT"
+            yel "        Shape fits the partition's per-node ceilings (mem=${REQ_MEM_MB}M ≤ ${_BIG_MEM_MB}M,"
+            yel "        cpu=${REQ_CPUS} ≤ ${_BIG_CPU}, gpu=${REQ_GPUS} ≤ ${_BIG_GPU}), so this is"
+            yel "        transient — all GPUs in '$PARTITION' are probably allocated right now."
+            yel "        Check: sinfo -p $PARTITION -o '%n %C %m %G %t'"
+            yel "        The real sbatch will queue the job in PD and start when a slot frees."
+            yel "        Ctrl-C within 5s to abort, or Enter to submit anyway..."
+            read -r -t 5 || true
+            ok "proceeding past transient resource-contention warning"
+        fi
     else
-        red "  sbatch --test-only rejected the submission. Running once more with stderr visible:"
-        sbatch --test-only --job-name="$JOBNAME" --exclude="$FLAKY_NODE" \
-               "${EXTRA_ARGS[@]}" "$SLURM_SCRIPT" "$CONFIG" || true
+        red "  sbatch --test-only rejected the submission with a non-transient error:"
+        red "    $TESTONLY_OUT"
         fail "fix the submission before retrying"
     fi
 else
