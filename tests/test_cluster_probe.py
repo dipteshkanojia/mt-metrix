@@ -192,6 +192,61 @@ def test_vram_for_gpu_type_ada_does_not_shadow_quadro(probe):
 
 
 # ---------------------------------------------------------------------------
+# Blocklist, tier, duration parsing (queue-aware additions)
+# ---------------------------------------------------------------------------
+
+def test_partitions_blocklist_contains_cogvis_project(probe):
+    """cogvis-project belongs to another faculty; we mustn't queue on it
+    even though it has 48 GB A6000s that would otherwise be attractive."""
+    assert "cogvis-project" in probe.PARTITIONS_BLOCKLIST
+
+
+def test_is_blocklisted(probe):
+    assert probe.is_blocklisted("cogvis-project") is True
+    assert probe.is_blocklisted("nice-project") is False
+    assert probe.is_blocklisted("a100") is False
+
+
+@pytest.mark.parametrize(
+    "partition,expected_tier",
+    [
+        ("nice-project", 1),       # our group's partition
+        ("rtx_a6000_risk", 2),     # 48 GB general
+        ("l40s_risk", 2),
+        ("rtx8000", 2),
+        ("3090", 3),               # 24 GB
+        ("3090_risk", 3),
+        ("debug", 4),              # short wall-time / 2080ti class
+        ("2080ti", 4),
+        ("a100", 5),               # reserved for >48 GB or when nothing else fits
+        ("unlisted-partition", 3), # unknown → default 3 so we don't crown it
+    ],
+)
+def test_partition_tier(probe, partition, expected_tier):
+    assert probe.partition_tier(partition) == expected_tier
+
+
+@pytest.mark.parametrize(
+    "raw,expected_s",
+    [
+        ("0:30", 30),               # MM:SS (30 s)
+        ("5:00", 300),              # MM:SS (5 m)
+        ("1:30:00", 5400),          # HH:MM:SS (1 h 30 m)
+        ("12:00:00", 43200),        # HH:MM:SS (12 h)
+        ("2-06:00:00", 194400),     # D-HH:MM:SS (2 d 6 h)
+        ("0-00:15:00", 900),        # explicit zero days
+        ("N/A", None),
+        ("UNLIMITED", None),
+        ("INVALID", None),
+        ("", None),
+        ("not-a-time", None),
+    ],
+)
+def test_parse_time_duration(probe, raw, expected_s):
+    assert probe.parse_time_duration(raw) == expected_s
+
+
+# ---------------------------------------------------------------------------
 # Gres / AllocTRES / State parsing
 # ---------------------------------------------------------------------------
 

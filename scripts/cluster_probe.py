@@ -109,6 +109,56 @@ def vram_for_gpu_type(gpu_type: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Queue-aware policy. The probe reads ``squeue`` (below) to enrich
+# per-partition fit checks with wait-time estimates, and chooses a
+# recommended partition by combining VRAM fit with two policies:
+#
+#   - PARTITIONS_BLOCKLIST: partitions that belong to other faculties /
+#     groups, and that we mustn't queue on even when they would otherwise
+#     fit. Starts as {"cogvis-project"}; extend as we learn more.
+#   - PARTITION_TIER: our preference ordering among partitions that DO
+#     accept our jobs. Lower = preferred. Ties are broken by wait time,
+#     then VRAM waste, then free-GPU count (see pick_recommended).
+#
+# Unknown partitions fall through to tier 3 so a stranger doesn't
+# accidentally outrank nice-project — 3 matches the 24 GB general tier,
+# a conservative middle ground.
+# ---------------------------------------------------------------------------
+
+PARTITIONS_BLOCKLIST: set[str] = {
+    "cogvis-project",
+}
+
+PARTITION_TIER: dict[str, int] = {
+    # Tier 1 — our group's partition
+    "nice-project": 1,
+    # Tier 2 — 48 GB open partitions
+    "rtx_a6000_risk": 2,
+    "l40s_risk":      2,
+    "rtx8000":        2,
+    # Tier 3 — 24 GB
+    "3090":           3,
+    "3090_risk":      3,
+    # Tier 4 — short / 11 GB
+    "debug":          4,
+    "2080ti":         4,
+    # Tier 5 — A100. De-prioritised for jobs that fit on 48 GB; see the
+    # a100-penalty logic in pick_recommended.
+    "a100":           5,
+}
+
+DEFAULT_TIER = 3
+
+
+def is_blocklisted(partition: str) -> bool:
+    return partition in PARTITIONS_BLOCKLIST
+
+
+def partition_tier(partition: str) -> int:
+    return PARTITION_TIER.get(partition, DEFAULT_TIER)
+
+
+# ---------------------------------------------------------------------------
 # VRAM inference from a run config. The catalogue is rich enough that we
 # can't do this with perfect accuracy without importing mt_metrix, but a
 # regex pass over ``ref:`` entries gets the right ballpark for every
@@ -210,6 +260,50 @@ def infer_vram_need(config_text: str, gpus: int = 1) -> ConfigVRAMNeed:
         scorers=scorers,
         skipped_tp=skipped_tp,
     )
+
+
+# ---------------------------------------------------------------------------
+# SLURM duration parsing. ``squeue`` emits job times in ``D-HH:MM:SS``,
+# ``HH:MM:SS``, or ``MM:SS`` depending on how much time has elapsed; it
+# also emits ``N/A``, ``UNLIMITED``, and (rarely) ``INVALID`` for jobs
+# that haven't started, have no wall-time cap, or have state-machine
+# glitches respectively. None of these map to an int, so we return
+# ``None`` and let the recommender treat ``None`` as "worse than any
+# finite wait" when ranking.
+# ---------------------------------------------------------------------------
+
+_DURATION_FULL_RE = re.compile(
+    r"^(?:(?P<days>\d+)-)?(?P<h>\d+):(?P<m>\d{2}):(?P<s>\d{2})$"
+)
+_DURATION_MS_RE = re.compile(r"^(?P<m>\d+):(?P<s>\d{2})$")
+
+
+def parse_time_duration(raw: str) -> Optional[int]:
+    """Parse a SLURM duration string into seconds; ``None`` if unknowable.
+
+    Accepts ``MM:SS``, ``HH:MM:SS``, ``D-HH:MM:SS``. Returns ``None`` for
+    ``N/A``, ``UNLIMITED``, empty string, and any other unrecognised
+    input (``INVALID``, garbage, etc.) — callers treat ``None`` as
+    "worse than any finite value" when ranking.
+    """
+    if not raw:
+        return None
+    trimmed = raw.strip()
+    if trimmed in {"N/A", "UNLIMITED", "INVALID"}:
+        return None
+    full = _DURATION_FULL_RE.match(trimmed)
+    if full:
+        days = int(full.group("days") or 0)
+        h = int(full.group("h"))
+        m = int(full.group("m"))
+        s = int(full.group("s"))
+        return days * 86400 + h * 3600 + m * 60 + s
+    ms = _DURATION_MS_RE.match(trimmed)
+    if ms:
+        m = int(ms.group("m"))
+        s = int(ms.group("s"))
+        return m * 60 + s
+    return None
 
 
 # ---------------------------------------------------------------------------
