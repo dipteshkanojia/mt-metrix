@@ -993,34 +993,140 @@ def render_table(
     return "\n".join(lines)
 
 
-def pick_recommended(
-    partitions: list[Partition],
-    fits: dict[str, FitStatus],
-    req: Request,
-) -> Optional[str]:
-    """If the target is contested or no-fit, suggest a ready alternative.
+@dataclass
+class Alternative:
+    """A ranked partition suggestion returned by :func:`pick_recommended`.
 
-    Prefers partitions with the SMALLEST fitting VRAM — don't send a
-    Kiwi-DA job to a100 when nice-project has capacity. Among ties
-    prefers the one with MORE free GPUs. Partitions with UNKNOWN-VRAM
-    status are NOT recommended: we can't promise they fit without
-    verifying, and a blind recommendation is worse than none.
+    ``wait_s`` is ``0`` when the partition has capacity right now; a
+    positive int for estimated wait in seconds; ``None`` when squeue
+    info is incomplete (callers render ``?`` and treat ``None`` as
+    worse-than-any-finite-wait when ranking).
     """
-    target_fit = fits.get(req.partition)
-    if target_fit and target_fit.has_capacity_now and target_fit.vram_known:
-        return None
-    candidates = [
-        p for p in partitions
-        if p.name != req.partition
-        and fits[p.name].has_capacity_now
-        and fits[p.name].vram_known
-        and (not req.vram_need_gb or p.max_vram_gb >= req.vram_need_gb)
-    ]
-    if not candidates:
-        return None
-    # Right-size: pick the smallest VRAM that still fits.
-    candidates.sort(key=lambda p: (p.max_vram_gb, -p.gpus_free))
-    return candidates[0].name
+
+    partition: str
+    wait_s: Optional[int]
+    tier: int
+    vram_waste_gb: int
+    gpus_free: int
+    reason: str
+
+
+def _a100_penalty_applies(
+    vram_need_gb: int, fits: dict[str, "FitStatus"],
+    partitions: list["Partition"],
+) -> bool:
+    """True iff a100 should be de-prioritised for this request.
+
+    a100 gets a +4 tier penalty when ``vram_need <= 48`` AND at least
+    one non-a100 partition is both READY (``has_capacity_now``) and
+    VRAM-known. That's the 'don't waste the 80 GB card when 48 GB is
+    idle' case. When vram_need > 48 OR every non-a100 option is
+    contested/unknown, the penalty drops and a100 competes on equal
+    tier terms.
+    """
+    if vram_need_gb > 48:
+        return False
+    for p in partitions:
+        if p.name == "a100" or is_blocklisted(p.name):
+            continue
+        fit = fits.get(p.name)
+        if fit is None:
+            continue
+        if fit.has_capacity_now and fit.vram_known:
+            return True
+    return False
+
+
+_WAIT_UNKNOWN = 10**12  # sort key proxy for "worse than any finite wait"
+
+
+def pick_recommended(
+    partitions: list["Partition"],
+    fits: dict[str, "FitStatus"],
+    req: "Request",
+) -> tuple[Optional[str], list[Alternative]]:
+    """Rank eligible partitions and return (recommended_name, alternatives).
+
+    Eligibility rules (partition must pass ALL to appear in alternatives):
+      - not blocklisted (see PARTITIONS_BLOCKLIST)
+      - shape_ok AND vram_known
+      - max_vram_gb >= req.vram_need_gb (or vram_need_gb is 0 / default)
+
+    Ranking tuple (ascending; lower is better):
+      (ready_now_rank,
+       tier + a100_penalty,
+       wait_s_sortable,        # 0 if ready_now else wait_s; None → _WAIT_UNKNOWN
+       vram_waste_gb,
+       -gpus_free)
+
+    Returns:
+      - recommended: the highest-ranked partition's name, or ``None`` if
+        no partition is eligible.
+      - alternatives: the top-3 ranked partitions with full scoring
+        rationale. May be empty when nothing is eligible.
+    """
+    a100_penalty_on = _a100_penalty_applies(req.vram_need_gb, fits, partitions)
+
+    eligible: list["Partition"] = []
+    for p in partitions:
+        if is_blocklisted(p.name):
+            continue
+        fit = fits.get(p.name)
+        if fit is None or not fit.shape_ok or not fit.vram_known:
+            continue
+        if req.vram_need_gb and p.max_vram_gb < req.vram_need_gb:
+            continue
+        eligible.append(p)
+
+    if not eligible:
+        return None, []
+
+    def score(p: "Partition") -> tuple[int, int, int, int, int]:
+        fit = fits[p.name]
+        ready_now = fit.has_capacity_now
+        ready_now_rank = 0 if ready_now else 1
+        tier = partition_tier(p.name)
+        a100_bonus = 4 if (p.name == "a100" and a100_penalty_on) else 0
+        if ready_now:
+            wait_key = 0
+        else:
+            w = estimate_wait_s(p, req.gpus)
+            wait_key = _WAIT_UNKNOWN if w is None else w
+        vram_waste = max(p.max_vram_gb - req.vram_need_gb, 0)
+        return (ready_now_rank, tier + a100_bonus, wait_key, vram_waste, -p.gpus_free)
+
+    ranked = sorted(eligible, key=score)
+
+    def _reason(p: "Partition") -> str:
+        fit = fits[p.name]
+        if fit.has_capacity_now:
+            if partition_tier(p.name) == 1:
+                return "free now, group partition"
+            return "free now"
+        w = estimate_wait_s(p, req.gpus)
+        if w is None:
+            return "no immediate capacity; wait unknown"
+        return f"no immediate capacity; est. wait {w // 60} min"
+
+    alternatives: list[Alternative] = []
+    for p in ranked[:3]:
+        fit = fits[p.name]
+        if fit.has_capacity_now:
+            wait_s: Optional[int] = 0
+        else:
+            wait_s = estimate_wait_s(p, req.gpus)
+        alternatives.append(
+            Alternative(
+                partition=p.name,
+                wait_s=wait_s,
+                tier=partition_tier(p.name),
+                vram_waste_gb=max(p.max_vram_gb - req.vram_need_gb, 0),
+                gpus_free=p.gpus_free,
+                reason=_reason(p),
+            )
+        )
+
+    return alternatives[0].partition, alternatives
 
 
 # ---------------------------------------------------------------------------
@@ -1134,7 +1240,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         return 1
 
-    recommended = pick_recommended(partitions, fits, req)
+    recommended_name, alternatives = pick_recommended(partitions, fits, req)
+    # Legacy alias kept for the current rendering block; Task 6 replaces
+    # the downstream behaviour with full alternative-list rendering.
+    recommended = (
+        recommended_name
+        if recommended_name and recommended_name != req.partition
+        else None
+    )
 
     if args.json:
         payload = {

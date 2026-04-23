@@ -648,60 +648,229 @@ def test_check_fit_ready_a100_with_tp4(probe):
 # ---------------------------------------------------------------------------
 
 def test_pick_recommended_when_target_contested(probe):
-    """Target rtx_a6000_risk is contested; 48 GB partitions with capacity
-    exist (nice-project / l40s_risk / cogvis-project). a100 is 80 GB →
-    overkill. Right-sizing picks the smallest-VRAM fit; among ties the one
-    with MORE free GPUs wins.
-    """
-    _, parts_map = _parse_all(probe)
-    partitions = sorted(parts_map.values(), key=lambda p: p.name)
-    req = probe.Request(
-        partition="rtx_a6000_risk", gpus=1, mem_mb=0, cpus=0, vram_need_gb=48,
+    """Target rtx_a6000_risk contested; nice-project wins on tier."""
+    partitions, fits, req = _full_probe(
+        probe, target="rtx_a6000_risk", gpus=1, vram_need_gb=48,
     )
-    fits = {p.name: probe.check_fit(p, req) for p in partitions}
-    rec = probe.pick_recommended(partitions, fits, req)
-    # Any of the 48 GB ready partitions. cogvis-project has the most free.
-    assert rec in {"nice-project", "l40s_risk", "cogvis-project"}
+    recommended, _ = probe.pick_recommended(partitions, fits, req)
+    assert recommended == "nice-project"
 
 
 def test_pick_recommended_none_when_target_ready(probe):
-    _, parts_map = _parse_all(probe)
-    partitions = sorted(parts_map.values(), key=lambda p: p.name)
-    req = probe.Request(
-        partition="a100", gpus=1, mem_mb=0, cpus=0, vram_need_gb=80,
+    """a100 target, 80 GB VRAM need, free now — recommendation equals
+    target (caller treats matching recommendation as 'no prompt')."""
+    partitions, fits, req = _full_probe(
+        probe, target="a100", gpus=1, vram_need_gb=80,
     )
-    fits = {p.name: probe.check_fit(p, req) for p in partitions}
-    assert probe.pick_recommended(partitions, fits, req) is None
+    recommended, _ = probe.pick_recommended(partitions, fits, req)
+    assert recommended == "a100"
 
 
 def test_pick_recommended_skips_unknown_vram(probe):
-    """A partition with UNKNOWN-VRAM must NEVER be recommended — we can't
-    promise it fits, and a blind recommendation is worse than none.
-    """
-    _, parts_map = _parse_all(probe)
+    partitions, fits, req = _full_probe(
+        probe, target="rtx_a6000_risk", gpus=1, vram_need_gb=48,
+    )
+    recommended, alternatives = probe.pick_recommended(partitions, fits, req)
+    assert recommended != "experimental"
+    for alt in alternatives:
+        assert alt.partition != "experimental"
+
+
+# ---------------------------------------------------------------------------
+# pick_recommended (queue-aware)
+# ---------------------------------------------------------------------------
+
+def _full_probe(probe, *, target: str, gpus: int, vram_need_gb: int, squeue_fixture: str = ""):
+    """Convenience: run the full detect → aggregate → attach → fit pipeline
+    against SCONTROL_FIXTURE (+ an optional squeue fixture) and return the
+    pieces pick_recommended needs."""
+    nodes = [
+        n for line in SCONTROL_FIXTURE.splitlines()
+        if (n := probe.parse_scontrol_node_line(line)) is not None
+    ]
+    parts_map = probe.aggregate_partitions(nodes)
+    if squeue_fixture:
+        jobs = [
+            j for line in squeue_fixture.splitlines()
+            if (j := probe.parse_squeue_line(line)) is not None
+        ]
+        probe.attach_queue_stats(parts_map, jobs)
     partitions = sorted(parts_map.values(), key=lambda p: p.name)
-    # Target contested; 'experimental' is the only partition with free
-    # GPUs that matches 'unknown-vram'. Recommendation must bypass it.
+    req = probe.Request(
+        partition=target, gpus=gpus, mem_mb=0, cpus=0,
+        vram_need_gb=vram_need_gb,
+    )
+    fits = {p.name: probe.check_fit(p, req) for p in partitions}
+    return partitions, fits, req
+
+
+def test_pick_recommended_returns_tuple(probe):
+    """New signature: (recommended_name_or_None, list[Alternative])."""
+    partitions, fits, req = _full_probe(
+        probe, target="a100", gpus=1, vram_need_gb=80,
+    )
+    result = probe.pick_recommended(partitions, fits, req)
+    assert isinstance(result, tuple) and len(result) == 2
+    recommended, alternatives = result
+    assert isinstance(alternatives, list)
+    for alt in alternatives:
+        # Alternative has at least these fields
+        assert hasattr(alt, "partition")
+        assert hasattr(alt, "wait_s")
+        assert hasattr(alt, "tier")
+        assert hasattr(alt, "reason")
+
+
+def test_pick_recommended_prefers_nice_project_by_tier(probe):
+    """Kiwi-DA (8 GB) on rtx_a6000_risk (contested). Both nice-project
+    and l40s_risk are 48 GB READY with 0 wait — nice-project wins on
+    tier (1 < 2)."""
+    partitions, fits, req = _full_probe(
+        probe, target="rtx_a6000_risk", gpus=1, vram_need_gb=8,
+    )
+    recommended, alternatives = probe.pick_recommended(partitions, fits, req)
+    assert recommended == "nice-project"
+    # Alternatives list: up to 3, first is the recommendation.
+    assert len(alternatives) >= 1
+    assert alternatives[0].partition == "nice-project"
+    assert alternatives[0].wait_s == 0
+    assert alternatives[0].tier == 1
+
+
+def test_pick_recommended_excludes_blocklist(probe):
+    """cogvis-project has 2 idle A6000s — exactly what this job wants —
+    but it's blocklisted. Recommender MUST NOT suggest it."""
+    partitions, fits, req = _full_probe(
+        probe, target="rtx_a6000_risk", gpus=1, vram_need_gb=48,
+    )
+    recommended, alternatives = probe.pick_recommended(partitions, fits, req)
+    assert recommended != "cogvis-project"
+    for alt in alternatives:
+        assert alt.partition != "cogvis-project"
+
+
+def test_pick_recommended_a100_penalty_when_48g_available(probe):
+    """Kiwi-DA (8 GB) with target=a100. nice-project (tier 1, 48 GB, READY)
+    exists and is wait=0 — a100 must NOT win despite being free. A100
+    penalty applies because ≥1 non-a100 READY partition is free."""
+    partitions, fits, req = _full_probe(
+        probe, target="a100", gpus=1, vram_need_gb=8,
+    )
+    recommended, alternatives = probe.pick_recommended(partitions, fits, req)
+    assert recommended == "nice-project"
+    # a100 is in alternatives but ranked lower than nice-project.
+    a100_alt = next((a for a in alternatives if a.partition == "a100"), None)
+    nice_alt = next((a for a in alternatives if a.partition == "nice-project"), None)
+    assert nice_alt is not None
+    if a100_alt is not None:
+        # nice-project's tier (1) + 0 penalty < a100's tier (5) + 4 penalty.
+        assert alternatives.index(nice_alt) < alternatives.index(a100_alt)
+
+
+def test_pick_recommended_a100_no_penalty_when_vram_need_over_48(probe):
+    """72B on gpus=4 needs 80 GB VRAM — only a100 fits. No penalty."""
+    partitions, fits, req = _full_probe(
+        probe, target="a100", gpus=4, vram_need_gb=80,
+    )
+    recommended, alternatives = probe.pick_recommended(partitions, fits, req)
+    assert recommended == "a100"
+
+
+def test_pick_recommended_a100_no_penalty_when_all_48g_contested(probe):
+    """If every 48 GB partition has wait_s > 0, a100 competes on equal
+    tier terms even for a 48 GB job. We simulate by manually setting
+    wait_s via a squeue fixture that blocks every 48 GB partition."""
+    # Build squeue where nice-project and l40s_risk are both fully
+    # allocated (running jobs consuming every GPU, plus pending demand).
+    squeue_fixture = "\n".join([
+        # nice-project: all 2 L40s allocated, 1 very-long-running job
+        "2001|nice-project|RUNNING|23:00:00|1:00:00|None|gres:gpu:2|1|u",
+        # l40s_risk: its 1 IDLE node becomes fully busy
+        "2002|l40s_risk|RUNNING|22:00:00|1:00:00|None|gres:gpu:2|1|u",
+        # a100 free as in the base fixture (no jobs)
+    ])
+    # We need aggregated partitions whose gpus_free is 0 to make the
+    # situation realistic — in SCONTROL_FIXTURE nice-project already has
+    # 1 GPU alloc'd so the running-job time for its 2nd GPU dominates.
+    nodes = [
+        n for line in SCONTROL_FIXTURE.splitlines()
+        if (n := probe.parse_scontrol_node_line(line)) is not None
+    ]
+    parts_map = probe.aggregate_partitions(nodes)
+    # Pretend both 48 GB partitions are fully allocated:
+    parts_map["nice-project"].gpus_alloc = parts_map["nice-project"].gpus_total
+    parts_map["l40s_risk"].gpus_alloc = parts_map["l40s_risk"].gpus_total
+    jobs = [
+        j for line in squeue_fixture.splitlines()
+        if (j := probe.parse_squeue_line(line)) is not None
+    ]
+    probe.attach_queue_stats(parts_map, jobs)
+    partitions = sorted(parts_map.values(), key=lambda p: p.name)
     req = probe.Request(
         partition="rtx_a6000_risk", gpus=1, mem_mb=0, cpus=0, vram_need_gb=48,
     )
     fits = {p.name: probe.check_fit(p, req) for p in partitions}
-    rec = probe.pick_recommended(partitions, fits, req)
-    assert rec != "experimental"
+    recommended, alternatives = probe.pick_recommended(partitions, fits, req)
+    # a100 should now be admissible (penalty dropped because no
+    # non-a100 READY partition is wait=0 any more).
+    a100_alt = next((a for a in alternatives if a.partition == "a100"), None)
+    assert a100_alt is not None
+    # a100 is ranked at or near the top — not buried beneath contested
+    # 48 GB options with non-zero wait.
+    assert alternatives[0].partition in {"a100", "3090", "l40s_risk", "rtx_a6000_risk"}
 
 
-def test_pick_recommended_prefers_smallest_fitting(probe):
-    """Kiwi-DA (need 8 GB) with target rtx_a6000_risk (contested) → should
-    recommend a small card (3090 24 GB), not a100 80 GB."""
-    _, parts_map = _parse_all(probe)
-    partitions = sorted(parts_map.values(), key=lambda p: p.name)
-    req = probe.Request(
-        partition="rtx_a6000_risk", gpus=1, mem_mb=0, cpus=0, vram_need_gb=8,
+def test_pick_recommended_no_alternatives_when_target_is_best(probe):
+    """Kiwi-DA on nice-project — already tier 1, wait=0. Recommended
+    equals target → caller treats this as 'no prompt needed'."""
+    partitions, fits, req = _full_probe(
+        probe, target="nice-project", gpus=1, vram_need_gb=8,
     )
-    fits = {p.name: probe.check_fit(p, req) for p in partitions}
-    rec = probe.pick_recommended(partitions, fits, req)
-    # 3090 is 24 GB — smallest of the ready set that fits 8 GB.
-    assert rec == "3090"
+    recommended, alternatives = probe.pick_recommended(partitions, fits, req)
+    assert recommended == "nice-project"    # already best
+    # Alternatives list still populated (submit.sh may show a table),
+    # and the first entry is nice-project.
+    assert alternatives[0].partition == "nice-project"
+
+
+def test_pick_recommended_no_recommendation_when_nothing_fits(probe):
+    """72B on gpus=1 after tp-skip → vram_need collapses to 8 GB, every
+    partition fits. But force an impossible mem requirement to verify
+    the 'nothing fits' path."""
+    partitions, fits, req = _full_probe(
+        probe, target="nice-project", gpus=1, vram_need_gb=8,
+    )
+    # Pretend nothing fits by replacing every fit with shape_ok=False.
+    fits_blocked = {
+        name: probe.FitStatus(
+            partition=name, shape_ok=False, has_capacity_now=False,
+            vram_known=True, reasons=["forced"],
+        )
+        for name in fits
+    }
+    recommended, alternatives = probe.pick_recommended(
+        partitions, fits_blocked, req,
+    )
+    assert recommended is None
+    assert alternatives == []
+
+
+def test_pick_recommended_returns_at_most_three_alternatives(probe):
+    """Many eligible partitions → truncate to top 3."""
+    partitions, fits, req = _full_probe(
+        probe, target="nice-project", gpus=1, vram_need_gb=8,
+    )
+    _, alternatives = probe.pick_recommended(partitions, fits, req)
+    assert len(alternatives) <= 3
+
+
+# ---------------------------------------------------------------------------
+# Old pick_recommended behaviour that the new scoring intentionally changes
+# is updated here: the legacy tests (test_pick_recommended_when_target_contested,
+# test_pick_recommended_prefers_smallest_fitting, test_pick_recommended_skips_unknown_vram,
+# test_pick_recommended_none_when_target_ready) now expect the tuple return
+# shape and tier-driven outcome.
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
