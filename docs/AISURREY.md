@@ -190,11 +190,14 @@ conda activate /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/conda_env
 # all four Surrey domain matrices (legal / general / tourism / health)
 scripts/submit_aisurrey.sh
 
-# or one at a time (default partition is nice-project; full-matrix
-# + XXL COMET + Tower-13B wants 256G CPU RAM):
-scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml --mem=256G
+# or one at a time (default partition is nice-project; the in-file
+# --mem=128G is already the node ceiling, don't override it upward —
+# aisurrey35 only has 128 GB host RAM and SLURM will reject --mem=256G
+# with "Requested node configuration is not available"):
+scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml
 
-# Tower-72B follow-up (the ONLY partition where it fits, tp=4):
+# Tower-72B follow-up (the ONLY partition where it fits, tp=4).
+# a100 nodes have >=256 GB host RAM, so --mem=256G is safe HERE:
 scripts/submit.sh configs/runs/surrey_legal_tower72b.yaml \
     -p a100 --gres=gpu:4 --mem=256G
 ```
@@ -229,8 +232,16 @@ mt-metrix correlate --run $SCRATCH/outputs/<run_id>
   `overrides: {batch_size: 2}` (or 1) to that scorer entry in the run
   config. On A100 80 GB no override is needed — batch=8 runs as-is.
 - **`slurmstepd: Detected 1 oom_kill event` with no CUDA traceback** →
-  cgroup / host-RAM OOM. Bump `--mem` (default is 128 GB; full-matrix
-  with XXL COMET + Tower-13B+ wants `--mem=256G`).
+  cgroup / host-RAM OOM. On `nice-project` the node ceiling is 128 GB so
+  you can't just bump `--mem` — pivot the OOMing scorer to a100 via a
+  dedicated run config (the a100 nodes have >=256 GB and you can pass
+  `-p a100 --mem=256G`).
+- **`allocation failure: Requested node configuration is not available`**
+  at `sbatch --test-only` time → you asked for more resources than the
+  target partition's largest node physically has. Common trap:
+  `--mem=256G` on `nice-project`, which caps at 128 GB. Drop the
+  override (the in-file default is correct for nice-project) or switch
+  partition with `-p a100`.
 - **`ImportError: vllm`** → installed without `[tower]` extra. Run
   `pip install -e ".[tower]"` or remove Tower scorers from the run.
 - **Job stuck in `PD` forever** → `a100` queue is full. `sinfo -p a100`

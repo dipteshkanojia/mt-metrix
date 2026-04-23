@@ -49,23 +49,46 @@
 #
 # Right-size CPU RAM (--mem) — separate from GPU VRAM and the root cause
 # of the 2026-04-19 matrix OOMs. unbabel-comet + pytorch-lightning
-# materialise the full model in CPU RAM first, then move it to GPU. Plan:
-#   sacrebleu / CometKiwi-DA (~1.5 GB) / Tower-2B (vllm):   32 GB covers it
-#   CometKiwi-XL / XCOMET-XL-QE (~12 GB) / Tower-7B:        64 GB baseline
-#   CometKiwi-XXL / XCOMET-XXL-QE (~40 GB fp32 state dict)  128 GB default
-#   Full matrix (xxl + Tower-13B) / Tower-72B:              256 GB override
-# 128 GB is the safe default for any single scorer including XXL. Full-matrix
-# runs should override with `--mem=256G` at submit time. Watch for
-# `slurmstepd: Detected 1 oom_kill event` with NO CUDA traceback — that's
-# the kernel OOM killer enforcing this cgroup limit.
+# materialise the full model in CPU RAM first, then move it to GPU.
+# Scorers load SEQUENTIALLY (each Scorer.unload() frees CPU + GPU before
+# the next loads), so the cap is per-scorer not cumulative:
+#   sacrebleu / CometKiwi-DA (~1.5 GB) / Tower-2B (vllm):   ~8 GB peak
+#   CometKiwi-XL / XCOMET-XL-QE (~12 GB) / Tower-7B:        ~30 GB peak
+#   CometKiwi-XXL / XCOMET-XXL-QE (~40 GB fp32 state dict)  ~60 GB peak
+#   Tower-13B (26 GB fp16 + tokeniser + KV):                ~50 GB peak
+#   Tower-72B:                                              ~180 GB peak
+#
+# PARTITION-SPECIFIC CEILINGS (SLURM rejects oversubscribing these):
+#   nice-project (aisurrey35):   128 GB host RAM total.  --mem=128G is MAX.
+#   rtx8000 / rtx_a6000_risk /   typically 128-256 GB depending on node.
+#     l40s_risk / 3090:          check with `scontrol show node <name>`.
+#   a100:                        >=256 GB host RAM on all a100 nodes.
+#   debug:                       check the specific node.
+# Requesting more than the node has triggers ``allocation failure:
+# Requested node configuration is not available`` at `sbatch --test-only`
+# time. The submit.sh wrapper surfaces that as FAIL before submission.
+#
+# Plan per scorer family given the ceilings above:
+#   Any single scorer on nice-project:      128G in-file default is correct
+#                                           (and is the node ceiling, so the
+#                                           wrapper won't let you ask more).
+#   Full matrix on nice-project:            same 128G — works because scorers
+#                                           are sequential (peak ~60 GB).
+#   Tower-72B on a100:                      256G override is safe (a100
+#                                           nodes have it) and recommended
+#                                           because 72B load briefly spikes.
+#   Headline / paper-quality on a100:       use the a100 ceiling (256G+) for
+#                                           headroom; no functional need.
+#
+# Watch for `slurmstepd: Detected 1 oom_kill event` with NO CUDA traceback —
+# that's the kernel OOM killer enforcing the cgroup limit. If this fires
+# on nice-project at 128G, pivot the affected scorer (usually XXL COMET
+# or Tower-13B) to a100 via a dedicated run config.
 #
 # Common submit patterns:
-#   # Default: nice-project, 1 GPU (L40s 48 GB), 128 GB RAM. Works for
-#   # every full-matrix scorer except Tower-72B.
+#   # Default full-matrix on nice-project — no flags needed, the in-file
+#   # 128G is both the right number AND the node ceiling.
 #   scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml
-#
-#   # Full-matrix with XXL COMET + Tower-13B — same partition, bigger mem:
-#   scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml --mem=256G
 #
 #   # Tower-72B follow-up (ONLY partition where it fits, tp=4):
 #   scripts/submit.sh configs/runs/surrey_legal_tower72b.yaml \
@@ -79,7 +102,7 @@
 #SBATCH --partition=nice-project     # NICE-group dedicated 2× L40s 48 GB; override with -p on CLI
 #SBATCH --gres=gpu:1                 # override with --gres=gpu:N (N=4 only for Tower-72B on a100)
 #SBATCH --cpus-per-task=8            # dataloader workers
-#SBATCH --mem=128G                   # CPU RAM floor for XXL COMET load; 256G for full matrix + Tower-13B+
+#SBATCH --mem=128G                   # = nice-project node ceiling; a100 can go to 256G via --mem override
 #SBATCH --time=24:00:00              # 24h; most runs finish in <4h
 #SBATCH --output=logs/slurm_%j_%x.out
 #SBATCH --error=logs/slurm_%j_%x.err
