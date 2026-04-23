@@ -951,56 +951,69 @@ def render_table(
     )
     header = (
         f"  {'partition':<18}  {'status':<13}  {'gpus (free/total)':<18}  "
-        f"{'type':<22}  {'vram':<6}"
+        f"{'type':<22}  {'vram':<6}  {'next free':<10}  {'pending':<7}"
     )
     lines.append(header)
     lines.append("  " + "-" * (len(header) - 2))
-    # Sort: target first, then ready > contested > unknown-vram > no-fit,
-    # then by free GPUs desc.
     def sort_key(p: Partition) -> tuple[int, int, int]:
         fit = fits.get(p.name)
         if p.name == req.partition:
             return (0, 0, 0)
         if fit is None:
+            return (5, 0, 0)
+        if is_blocklisted(p.name):
             return (4, 0, 0)
         rank = {
             "ready": 1,
             "contested": 2,
             "unknown-vram": 3,
-            "no-fit": 4,
+            "no-fit": 5,
         }[fit.status_word()]
         return (rank, -p.gpus_free, 0)
     has_mixed_any = False
     for p in sorted(partitions, key=sort_key):
         fit = fits.get(p.name)
-        status = fit.status_word() if fit else "?"
-        if status == "ready":
-            colour_code = c["grn"]
-            tag = "READY"
-        elif status == "contested":
-            colour_code = c["yel"]
-            tag = "CONTESTED"
-        elif status == "unknown-vram":
-            colour_code = c["yel"]
-            tag = "UNKNOWN-VRAM"
-        elif status == "no-fit":
-            colour_code = c["red"]
-            tag = "NO-FIT"
-        else:
+        blocked = is_blocklisted(p.name)
+        if blocked:
+            colour_code = c["dim"]
+            tag = "[not ours]"
+        elif fit is None:
             colour_code = c["dim"]
             tag = "?"
+        else:
+            status = fit.status_word()
+            if status == "ready":
+                colour_code, tag = c["grn"], "READY"
+            elif status == "contested":
+                colour_code, tag = c["yel"], "CONTESTED"
+            elif status == "unknown-vram":
+                colour_code, tag = c["yel"], "UNKNOWN-VRAM"
+            elif status == "no-fit":
+                colour_code, tag = c["red"], "NO-FIT"
+            else:
+                colour_code, tag = c["dim"], "?"
         mark = " *" if p.name == req.partition else "  "
         gpu_cell = f"{p.gpus_free}/{p.gpus_total}"
         gpu_type = p.dominant_gpu_type or "—"
-        # Suffix with '+' to signal mixed-hardware partition (the displayed
-        # type is the one that produced max_vram_gb; other node types exist).
         if p.has_mixed_gpu_types:
             gpu_type = f"{gpu_type}+"
             has_mixed_any = True
         vram = f"{p.max_vram_gb}G" if p.max_vram_gb else "—"
+        # next free: "now" if ready + capacity; HHhMMm if running job has a
+        # known time left; "?" otherwise.
+        if p.gpus_free >= req.gpus and not blocked:
+            nf = "now"
+        elif p.earliest_free_s is not None:
+            hh = p.earliest_free_s // 3600
+            mm = (p.earliest_free_s % 3600) // 60
+            nf = f"{hh}h{mm:02d}m" if hh else f"{mm}m"
+        else:
+            nf = "?"
+        pending = str(len(p.pending_jobs))
         lines.append(
             f"{mark}{p.name:<18}  {colour_code}{tag:<13}{c['reset']}  "
-            f"{gpu_cell:<18}  {gpu_type:<22}  {vram:<6}"
+            f"{gpu_cell:<18}  {gpu_type:<22}  {vram:<6}  "
+            f"{nf:<10}  {pending:<7}"
         )
     if has_mixed_any:
         lines.append(
@@ -1309,7 +1322,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             "request": asdict(req),
             "target_fit": asdict(target_fit),
             "partitions": [asdict(p) | {"gpus_free": p.gpus_free} for p in partitions],
-            "recommendation": recommended,
+            "recommendation": recommended_name,
+            "alternatives": [asdict(a) for a in alternatives],
             "vram_inference": asdict(vram_detail) if vram_detail else None,
         }
         print(json.dumps(payload, indent=2))

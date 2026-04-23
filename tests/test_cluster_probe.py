@@ -1477,3 +1477,65 @@ def test_main_tee_alternatives_oserror_is_non_fatal(probe, monkeypatch, capsys, 
     assert "alts.tsv" in captured.err
     # And no TSV should have been created (the write was the thing that failed).
     assert not tee.exists()
+
+
+# ---------------------------------------------------------------------------
+# Render + JSON updates
+# ---------------------------------------------------------------------------
+
+def test_render_table_has_queue_columns(probe, monkeypatch, capsys, tmp_path):
+    """The human-readable table must show `next free` and `pending` columns."""
+    monkeypatch.setattr(probe, "run_scontrol_show_node", lambda: SCONTROL_FIXTURE)
+    monkeypatch.setattr(probe, "run_squeue", lambda: SQUEUE_FIXTURE)
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("scorers:\n  - ref: comet/wmt22-cometkiwi-da\n")
+    probe.main([
+        "--config", str(cfg),
+        "--partition", "a100", "--gpus", "1",
+        "--slurm-script", "/dev/null",
+        "--no-colour",
+    ])
+    out = capsys.readouterr().out
+    assert "next free" in out
+    assert "pending" in out
+
+
+def test_render_table_tags_blocklisted(probe, monkeypatch, capsys, tmp_path):
+    """cogvis-project row must be tagged [not ours] and not recommended."""
+    monkeypatch.setattr(probe, "run_scontrol_show_node", lambda: SCONTROL_FIXTURE)
+    monkeypatch.setattr(probe, "run_squeue", lambda: "")
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("scorers:\n  - ref: comet/wmt22-cometkiwi-da\n")
+    probe.main([
+        "--config", str(cfg),
+        "--partition", "a100", "--gpus", "1",
+        "--slurm-script", "/dev/null",
+        "--no-colour",
+    ])
+    out = capsys.readouterr().out
+    assert "cogvis-project" in out
+    assert "[not ours]" in out
+
+
+def test_json_output_includes_alternatives(probe, monkeypatch, capsys, tmp_path):
+    import json as jsonmod
+    monkeypatch.setattr(probe, "run_scontrol_show_node", lambda: SCONTROL_FIXTURE)
+    monkeypatch.setattr(probe, "run_squeue", lambda: SQUEUE_FIXTURE)
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("scorers:\n  - ref: comet/wmt22-cometkiwi-da\n")
+    probe.main([
+        "--config", str(cfg),
+        "--partition", "a100", "--gpus", "1",
+        "--slurm-script", "/dev/null",
+        "--json",
+    ])
+    payload = jsonmod.loads(capsys.readouterr().out)
+    assert "alternatives" in payload
+    assert isinstance(payload["alternatives"], list)
+    assert len(payload["alternatives"]) >= 1
+    first = payload["alternatives"][0]
+    for key in ("partition", "wait_s", "tier", "vram_waste_gb", "gpus_free", "reason"):
+        assert key in first
+    # With this config (Kiwi-DA 8 GB), nice-project should top the list.
+    assert payload["alternatives"][0]["partition"] == "nice-project"
+    assert payload["recommendation"] == "nice-project"
