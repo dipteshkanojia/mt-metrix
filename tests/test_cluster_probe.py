@@ -1348,3 +1348,72 @@ def test_main_probe_exit_three_preserved(probe, monkeypatch):
         "--no-colour",
     ])
     assert rc == 3
+
+
+# ---------------------------------------------------------------------------
+# --tee-alternatives TSV sidecar
+# ---------------------------------------------------------------------------
+
+def test_main_tee_alternatives_writes_tsv(probe, monkeypatch, tmp_path):
+    monkeypatch.setattr(probe, "run_scontrol_show_node", lambda: SCONTROL_FIXTURE)
+    monkeypatch.setattr(probe, "run_squeue", lambda: "")
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("scorers:\n  - ref: comet/wmt22-cometkiwi-da\n")
+    tee = tmp_path / "alts.tsv"
+    rc = probe.main([
+        "--config", str(cfg),
+        "--partition", "a100", "--gpus", "1",
+        "--slurm-script", "/dev/null",
+        "--tee-alternatives", str(tee),
+        "--no-colour",
+    ])
+    assert rc == 0
+    assert tee.is_file()
+    lines = tee.read_text().splitlines()
+    # Header + at least 1 alternative
+    assert lines[0] == "rank\tpartition\tgpus_requested\twait_s\ttier\treason"
+    assert len(lines) >= 2
+    # Each data row has 6 tab-separated fields
+    for row in lines[1:]:
+        assert len(row.split("\t")) == 6
+
+
+def test_main_tee_alternatives_kiwi_da_recommends_nice_project(probe, monkeypatch, tmp_path):
+    """TSV content must reflect the tier-1 preference for a small job."""
+    monkeypatch.setattr(probe, "run_scontrol_show_node", lambda: SCONTROL_FIXTURE)
+    monkeypatch.setattr(probe, "run_squeue", lambda: "")
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("scorers:\n  - ref: comet/wmt22-cometkiwi-da\n")
+    tee = tmp_path / "alts.tsv"
+    probe.main([
+        "--config", str(cfg),
+        "--partition", "a100", "--gpus", "1",
+        "--slurm-script", "/dev/null",
+        "--tee-alternatives", str(tee),
+        "--no-colour",
+    ])
+    lines = tee.read_text().splitlines()
+    # Second line (rank 1) partition is nice-project.
+    cols = lines[1].split("\t")
+    assert cols[0] == "1"
+    assert cols[1] == "nice-project"
+
+
+def test_main_calls_run_squeue(probe, monkeypatch, capsys, tmp_path):
+    """Smoke: main() must actually invoke run_squeue — otherwise the
+    queue-aware scoring is decoration, not behaviour."""
+    called = {"n": 0}
+    def fake_squeue():
+        called["n"] += 1
+        return ""  # no jobs, but it was called
+    monkeypatch.setattr(probe, "run_scontrol_show_node", lambda: SCONTROL_FIXTURE)
+    monkeypatch.setattr(probe, "run_squeue", fake_squeue)
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("scorers:\n  - ref: comet/wmt22-cometkiwi-da\n")
+    probe.main([
+        "--config", str(cfg),
+        "--partition", "a100", "--gpus", "1",
+        "--slurm-script", "/dev/null",
+        "--no-colour",
+    ])
+    assert called["n"] == 1

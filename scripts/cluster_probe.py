@@ -1191,6 +1191,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="emit machine-readable JSON")
     p.add_argument("--no-colour", action="store_true",
                    help="disable ANSI colour in the table")
+    p.add_argument("--tee-alternatives", type=Path, default=None,
+                   help="write ranked alternatives to this TSV path "
+                        "(one row per alternative; used by submit.sh).")
     args = p.parse_args(argv)
 
     # Slurm-script defaults — parsed FIRST because the requested --gres=gpu:N
@@ -1241,7 +1244,19 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("cluster_probe: scontrol returned no node records",
                   file=sys.stderr)
         return 3
+
+    raw_squeue = run_squeue()
+    jobs: list[Job] = []
+    if raw_squeue:
+        for line in raw_squeue.splitlines():
+            j = parse_squeue_line(line)
+            if j is not None:
+                jobs.append(j)
+    # attach_queue_stats tolerates jobs on unknown partitions; it's safe
+    # to call with an empty jobs list when squeue was unavailable.
+
     partitions_map = aggregate_partitions(nodes)
+    attach_queue_stats(partitions_map, jobs)
     partitions = sorted(partitions_map.values(), key=lambda p: p.name)
     fits = {p.name: check_fit(p, req) for p in partitions}
 
@@ -1355,6 +1370,25 @@ def main(argv: Optional[list[str]] = None) -> int:
                       f"scripts/submit.sh <config> -p {recommended}")
         else:
             print(f"  → {req.partition}: READY — proceed with pre-flight.")
+
+    if args.tee_alternatives is not None:
+        try:
+            args.tee_alternatives.parent.mkdir(parents=True, exist_ok=True)
+            with args.tee_alternatives.open("w") as fh:
+                fh.write("rank\tpartition\tgpus_requested\twait_s\ttier\treason\n")
+                for i, alt in enumerate(alternatives, start=1):
+                    wait_s_str = "" if alt.wait_s is None else str(alt.wait_s)
+                    fh.write(
+                        f"{i}\t{alt.partition}\t{req.gpus}\t"
+                        f"{wait_s_str}\t{alt.tier}\t{alt.reason}\n"
+                    )
+        except OSError as e:
+            print(
+                f"cluster_probe: could not write --tee-alternatives file "
+                f"{args.tee_alternatives}: {e}",
+                file=sys.stderr,
+            )
+            # Non-fatal: we still return the probe's normal exit code.
 
     # Exit code policy.
     # 4 (nothing fits anywhere) takes precedence over 1/2: if we can't
