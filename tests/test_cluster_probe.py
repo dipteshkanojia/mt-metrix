@@ -945,3 +945,89 @@ def test_parse_squeue_line_cpu_job_zero_gpus(probe):
     j = probe.parse_squeue_line(line)
     assert j is not None
     assert j.num_gpus == 0
+
+
+# ---------------------------------------------------------------------------
+# attach_queue_stats
+# ---------------------------------------------------------------------------
+
+def test_attach_queue_stats_mixed_partition_traffic(probe):
+    _, parts_map = _parse_all(probe)
+    jobs = [
+        j for line in SQUEUE_FIXTURE.splitlines()
+        if (j := probe.parse_squeue_line(line)) is not None
+    ]
+    probe.attach_queue_stats(parts_map, jobs)
+
+    # a100: 1 running (2h14m), 1 pending (4× a100)
+    a = parts_map["a100"]
+    assert len(a.running_jobs) == 1
+    assert len(a.pending_jobs) == 1
+    assert a.earliest_free_s == 2 * 3600 + 14 * 60
+    assert a.pending_gpu_demand == 4
+
+    # nice-project: 1 running (10h), 0 pending
+    n = parts_map["nice-project"]
+    assert len(n.running_jobs) == 1
+    assert n.pending_jobs == []
+    assert n.earliest_free_s == 10 * 3600
+    assert n.pending_gpu_demand == 0
+
+    # rtx_a6000_risk: 1 running (2d6h), 1 pending (UNLIMITED)
+    r = parts_map["rtx_a6000_risk"]
+    assert len(r.running_jobs) == 1
+    assert len(r.pending_jobs) == 1
+    assert r.earliest_free_s == 2 * 86400 + 6 * 3600
+    assert r.pending_gpu_demand == 1
+
+    # debug: 1 running CPU-only job (num_gpus=0)
+    # debug is not in our fixture's scontrol output (no Partitions=debug
+    # node), so attach_queue_stats must silently skip jobs on unknown
+    # partitions rather than crash.
+    assert "debug" not in parts_map
+
+
+def test_attach_queue_stats_handles_unknown_partition(probe):
+    """Jobs whose .partition isn't in the scontrol-derived partitions map
+    must be dropped silently — they don't affect any aggregates."""
+    _, parts_map = _parse_all(probe)
+    ghost = probe.Job(
+        job_id="999", partition="nonexistent",
+        state="PENDING", time_left_s=None, time_used_s=None,
+        num_gpus=1, reason="Resources", user="someone",
+    )
+    probe.attach_queue_stats(parts_map, [ghost])
+    # parts_map untouched: nonexistent partition isn't injected.
+    assert "nonexistent" not in parts_map
+
+
+def test_attach_queue_stats_ignores_jobs_with_unknown_time_left(probe):
+    """Running jobs whose TimeLeft was UNLIMITED / N/A shouldn't decide
+    earliest_free_s — we only know the min across KNOWN finite values.
+    """
+    _, parts_map = _parse_all(probe)
+    nice_jobs = [
+        probe.Job(
+            job_id="J1", partition="nice-project", state="RUNNING",
+            time_left_s=3600, time_used_s=0, num_gpus=1,
+            reason="None", user="u",
+        ),
+        probe.Job(
+            job_id="J2", partition="nice-project", state="RUNNING",
+            time_left_s=None, time_used_s=0, num_gpus=1,
+            reason="None", user="u",
+        ),
+    ]
+    probe.attach_queue_stats(parts_map, nice_jobs)
+    assert parts_map["nice-project"].earliest_free_s == 3600
+
+
+def test_aggregate_partitions_defaults_queue_fields(probe):
+    """Existing aggregator call (no attach_queue_stats yet) leaves the
+    new fields empty/defaulted — no crash, no stale data."""
+    _, parts_map = _parse_all(probe)
+    p = parts_map["nice-project"]
+    assert p.running_jobs == []
+    assert p.pending_jobs == []
+    assert p.earliest_free_s is None
+    assert p.pending_gpu_demand == 0

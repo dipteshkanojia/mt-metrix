@@ -621,6 +621,11 @@ class Partition:
     # per-node ceiling SLURM will enforce on --gres=gpu:N requests.
     max_gpu_per_node: int = 0
     node_names: list[str] = field(default_factory=list)
+    # ---- queue-aware additions (Task 3) ----
+    running_jobs: list["Job"] = field(default_factory=list)
+    pending_jobs: list["Job"] = field(default_factory=list)
+    earliest_free_s: Optional[int] = None
+    pending_gpu_demand: int = 0
 
     @property
     def gpus_free(self) -> int:
@@ -691,6 +696,33 @@ def aggregate_partitions(nodes: list[Node]) -> dict[str, Partition]:
             if n.gpu_total > part.max_gpu_per_node:
                 part.max_gpu_per_node = n.gpu_total
     return parts
+
+
+def attach_queue_stats(
+    partitions: dict[str, "Partition"], jobs: list["Job"]
+) -> None:
+    """Populate per-partition running/pending/earliest_free/pending_demand.
+
+    Jobs on partitions we didn't learn about from scontrol are skipped —
+    they can't influence any partition we might recommend. Running jobs
+    whose ``time_left_s`` is None don't push ``earliest_free_s`` either
+    (unknown finish time is worse than any known one for ranking).
+    """
+    for job in jobs:
+        part = partitions.get(job.partition)
+        if part is None:
+            continue
+        if job.state == "RUNNING":
+            part.running_jobs.append(job)
+            if job.time_left_s is not None and (
+                part.earliest_free_s is None
+                or job.time_left_s < part.earliest_free_s
+            ):
+                part.earliest_free_s = job.time_left_s
+        elif job.state == "PENDING":
+            part.pending_jobs.append(job)
+            part.pending_gpu_demand += job.num_gpus
+        # Ignore COMPLETING/CONFIGURING/CANCELLED etc. — not load-bearing.
 
 
 # ---------------------------------------------------------------------------
