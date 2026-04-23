@@ -1,8 +1,11 @@
 # 04 — Submitting to AISURREY
 
 The canonical submit path is `scripts/submit.sh` — a bash wrapper that
-runs five pre-flight checks, calls `sbatch --test-only` to validate the
-plan against the live cluster, and submits with `--exclude=aisurrey26`.
+runs six pre-flight checks (including `scripts/cluster_probe.py` which
+queries `scontrol` for live GPU availability per partition and infers
+the job's VRAM need from the config's scorers), calls `sbatch
+--test-only` to validate the plan against the live cluster, and submits
+with `--exclude=aisurrey26`.
 
 Read `docs/AISURREY.md` for the full cluster runbook, `docs/SESSION_HANDOFF.md`
 for the fresh-session briefing. This example is the short version.
@@ -32,9 +35,9 @@ echo "hf_xxx..." > ~/.hf_token && chmod 600 ~/.hf_token
 
 ## 1. Dry-run the submission (pre-flight only)
 
-`--dry-run` runs the five pre-flight checks and `sbatch --test-only`, but
-does NOT queue the job. Use this whenever you're unsure about a config
-change or a partition override.
+`--dry-run` runs the six pre-flight checks (including the cluster
+probe) and `sbatch --test-only`, but does NOT queue the job. Use this
+whenever you're unsure about a config change or a partition override.
 
 ```bash
 cd /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/repo

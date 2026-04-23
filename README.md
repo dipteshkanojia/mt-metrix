@@ -41,9 +41,10 @@ git pull
 scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml
 ```
 
-`scripts/submit.sh` wraps `sbatch` with five pre-flight checks (partition,
-conda env, duplicates, `sbatch --test-only`) and excludes the flaky
-`aisurrey26` node. See [docs/AISURREY.md](docs/AISURREY.md) and
+`scripts/submit.sh` wraps `sbatch` with six pre-flight checks (partition,
+conda env, duplicates, cluster probe for live capacity + VRAM fit,
+`sbatch --test-only`) and excludes the flaky `aisurrey26` node. See
+[docs/AISURREY.md](docs/AISURREY.md) and
 [docs/SESSION_HANDOFF.md](docs/SESSION_HANDOFF.md) for the full cluster
 runbook.
 

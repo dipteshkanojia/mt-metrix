@@ -2,9 +2,10 @@
 
 This module is intentionally thin. The canonical path for submitting a job
 on AISURREY is ``scripts/submit.sh`` — a bash wrapper that performs the
-five pre-flight checks (partition exists, not the nonexistent ``gpu``
-partition; conda env present; no duplicate in queue; ``sbatch --test-only``
-accepts the plan) and submits with ``--exclude=aisurrey26``.
+six pre-flight checks (partition exists, not the nonexistent ``gpu``
+partition; conda env present; no duplicate in queue; cluster probe for
+live capacity + VRAM fit; ``sbatch --test-only`` accepts the plan) and
+submits with ``--exclude=aisurrey26``.
 
 See ``~/Documents/Claude/agent-context/aisurrey-deploy.md`` for the full
 SOP that informs this design.
@@ -75,7 +76,7 @@ def submit_via_wrapper(
     dry_run: bool = False,
     repo_root: Path | None = None,
 ) -> tuple[int, str | None]:
-    """Submit via ``scripts/submit.sh`` (runs the five pre-flight checks).
+    """Submit via ``scripts/submit.sh`` (runs the six pre-flight checks).
 
     ``sbatch_args`` are forwarded verbatim to ``sbatch`` inside the wrapper,
     e.g. ``["-p", "rtx_a6000_risk", "--gres=gpu:1", "--time=02:00:00"]``.

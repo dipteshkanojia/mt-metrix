@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # submit.sh — AISURREY-safe wrapper around sbatch for mt-metrix runs.
 #
-# Runs five pre-flight checks before submitting any job, and short-circuits
+# Runs six pre-flight checks before submitting any job, and short-circuits
 # on the cheap failures that usually cost 30+ minutes when skipped:
 #
 #   1. Config file + slurm script exist.
@@ -10,7 +10,12 @@
 #      AISURREY — this check catches that typo instantly.
 #   3. Conda env 'mt-metrix' exists (case-sensitive; check `conda env list`).
 #   4. No duplicate of this config already queued / running under your user.
-#   5. sbatch --test-only dry-run: resolves partition/gres/mem/time against
+#   5. Cluster probe: scontrol-driven DETECT + COMPREHEND + ADVISE. Shows
+#      free GPUs per partition, infers VRAM need from the config's scorers,
+#      and recommends a wide-open alternative when the target is contested.
+#      Runs before --test-only so the user sees live capacity before SLURM
+#      makes its own decision. See scripts/cluster_probe.py.
+#   6. sbatch --test-only dry-run: resolves partition/gres/mem/time against
 #      current cluster state without actually queueing the job.
 #
 # It also soft-warns if the requested GPU count exceeds 4. Nodes expose up
@@ -93,14 +98,14 @@ _parse_mem_mb() {
 
 # ---------------------------------------------------------------- check 1: config + slurm script exist
 
-echo "[1/5] config file check..."
+echo "[1/6] config file check..."
 [[ -f "$CONFIG" ]] || fail "config not found: $CONFIG"
 [[ -f "$SLURM_SCRIPT" ]] || fail "slurm script not found: $SLURM_SCRIPT (run from repo root)"
 ok "config: $CONFIG"
 
 # ---------------------------------------------------------------- check 2: partition exists
 
-echo "[2/5] partition sanity check (no 'gpu' partition on AISURREY)..."
+echo "[2/6] partition sanity check (no 'gpu' partition on AISURREY)..."
 PARTITION=""
 for ((i=0; i<${#EXTRA_ARGS[@]}; i++)); do
     case "${EXTRA_ARGS[$i]}" in
@@ -129,7 +134,7 @@ fi
 
 # ---------------------------------------------------------------- check 3: conda env (prefix path on scratch)
 
-echo "[3/5] conda env check (prefix $CONDA_ENV_PREFIX)..."
+echo "[3/6] conda env check (prefix $CONDA_ENV_PREFIX)..."
 if [ ! -f "$CONDA_ENV_PREFIX/bin/python" ]; then
     fail "conda env not found at $CONDA_ENV_PREFIX. Run: bash scripts/setup_cluster.sh"
 fi
@@ -137,7 +142,7 @@ ok "conda env present at $CONDA_ENV_PREFIX"
 
 # ---------------------------------------------------------------- check 4: no duplicate job
 
-echo "[4/5] duplicate job check..."
+echo "[4/6] duplicate job check..."
 JOBNAME=$(basename "$CONFIG" .yaml)
 if command -v squeue >/dev/null 2>&1; then
     DUP=$(squeue -h -u "$USER" -o '%j' 2>/dev/null | grep -xc "$JOBNAME" || true)
@@ -177,7 +182,71 @@ elif [[ -n "$GPU_COUNT" ]] && [[ "$GPU_COUNT" =~ ^[0-9]+$ ]]; then
     ok "gpu count: $GPU_COUNT (within 4-GPU soft cap)"
 fi
 
-# ---------------------------------------------------------------- check 5: sbatch --test-only
+# ---------------------------------------------------------------- check 5: cluster probe (DETECT + COMPREHEND + ADVISE)
+#
+# Runs scripts/cluster_probe.py to show live per-partition GPU availability,
+# infer VRAM need from the config's scorers, and recommend a ready
+# alternative if the target partition is contested or can't ever fit the
+# job. The probe is stdlib-only Python so it runs here, BEFORE conda
+# activate inside the job.
+#
+# Exit codes from cluster_probe.py:
+#   0 → ready (proceed)
+#   1 → no-fit: partition can never run this (fail hard)
+#   2 → contested: partition fits but has no free GPUs right now (warn + grace)
+#   3 → probe itself failed (scontrol missing etc. — proceed, let --test-only decide)
+
+echo "[5/6] cluster probe (live capacity + VRAM fit)..."
+CLUSTER_PROBE="scripts/cluster_probe.py"
+if [[ -f "$CLUSTER_PROBE" ]] && command -v python3 >/dev/null 2>&1; then
+    # Forward the same overrides the real sbatch will see, so the probe
+    # evaluates the actual request (not just the in-file defaults).
+    PROBE_ARGS=("--config" "$CONFIG" "--partition" "$PARTITION"
+                "--slurm-script" "$SLURM_SCRIPT")
+    if [[ -n "${GPU_COUNT:-}" ]] && [[ "${GPU_COUNT:-}" =~ ^[0-9]+$ ]]; then
+        PROBE_ARGS+=("--gpus" "$GPU_COUNT")
+    fi
+    for arg in "${EXTRA_ARGS[@]:-}"; do
+        case "$arg" in
+            --mem=*)           PROBE_ARGS+=("--mem" "${arg#--mem=}") ;;
+            --cpus-per-task=*) PROBE_ARGS+=("--cpus" "${arg#--cpus-per-task=}") ;;
+        esac
+    done
+    # We want the probe's human-readable output streamed to the user.
+    set +e
+    python3 "$CLUSTER_PROBE" "${PROBE_ARGS[@]}"
+    PROBE_RC=$?
+    set -e
+    case "$PROBE_RC" in
+        0)
+            ok "cluster probe: target partition has capacity"
+            ;;
+        1)
+            # Genuine shape violation — no node in the partition can ever
+            # run this. Fall through to pre-flight #6 which will either
+            # confirm with sbatch --test-only shape logic or (if sbatch is
+            # unavailable) at least warn before submitting a doomed job.
+            red "  cluster probe rejected the target partition (see table above)."
+            fail "target partition cannot run this shape; pick a different -p"
+            ;;
+        2)
+            yel "  cluster probe: target partition is fully allocated right now."
+            yel "        See recommendation above to switch partitions, or wait for capacity."
+            yel "        Ctrl-C within 5s to abort, or Enter to let --test-only decide..."
+            read -r -t 5 || true
+            ;;
+        3)
+            yel "  warn: cluster probe couldn't query scontrol; proceeding to --test-only."
+            ;;
+        *)
+            yel "  warn: cluster probe returned unexpected exit $PROBE_RC; proceeding."
+            ;;
+    esac
+else
+    yel "  warn: cluster probe unavailable (python3 or $CLUSTER_PROBE missing); skipping."
+fi
+
+# ---------------------------------------------------------------- check 6: sbatch --test-only
 #
 # sbatch --test-only green-lights only when the job could start IMMEDIATELY
 # on some node in the target partition. On a single-node partition (e.g.
@@ -198,7 +267,7 @@ fi
 # --cpus-per-task, --gres=gpu:N) genuinely exceeds the node ceiling → (c).
 # Otherwise it's (b), warn and continue.
 
-echo "[5/5] sbatch --test-only (validates partition/gres/mem/time vs. live cluster)..."
+echo "[6/6] sbatch --test-only (validates partition/gres/mem/time vs. live cluster)..."
 if command -v sbatch >/dev/null 2>&1; then
     TESTONLY_OUT=$(sbatch --test-only --job-name="$JOBNAME" --exclude="$FLAKY_NODE" \
                           "${EXTRA_ARGS[@]}" "$SLURM_SCRIPT" "$CONFIG" 2>&1) && TESTONLY_RC=0 || TESTONLY_RC=$?

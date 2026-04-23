@@ -283,3 +283,81 @@ def test_submit_sh_queries_partition_ceiling_before_failing():
     assert "sinfo   -h -p \"$PARTITION\" -N -o '%G'" in txt, (
         "shape check must ask sinfo for largest-node Gres"
     )
+
+
+# ---------------------------------------------------------------------------
+# Cluster-probe integration. submit.sh must run scripts/cluster_probe.py as
+# pre-flight [5/6] so the user sees live per-partition capacity and a VRAM-
+# aware recommendation BEFORE sbatch makes its own decision.
+# ---------------------------------------------------------------------------
+
+def test_submit_sh_runs_cluster_probe_before_test_only():
+    """Pre-flight [5/6] must invoke cluster_probe.py, and the --test-only
+    step must still run afterwards (it's now labelled [6/6])."""
+    txt = resolve_submit_script(REPO_ROOT).read_text()
+    # The probe must be invoked.
+    assert "scripts/cluster_probe.py" in txt, (
+        "submit.sh must call scripts/cluster_probe.py for DETECT+COMPREHEND+ADVISE"
+    )
+    assert "python3 \"$CLUSTER_PROBE\"" in txt, (
+        "probe is stdlib-only and must run via python3 before conda activate"
+    )
+    # Probe comes BEFORE the --test-only step.
+    probe_idx = txt.index("scripts/cluster_probe.py")
+    test_only_idx = txt.index("sbatch --test-only")
+    assert probe_idx < test_only_idx, (
+        "cluster_probe.py must run BEFORE sbatch --test-only"
+    )
+    # Step counters updated.
+    assert "[5/6] cluster probe" in txt
+    assert "[6/6] sbatch --test-only" in txt
+
+
+def test_submit_sh_maps_cluster_probe_exit_codes():
+    """submit.sh must distinguish probe exit codes: 0 ready, 1 no-fit
+    (hard fail), 2 contested (warn + grace), 3 probe failed (proceed)."""
+    txt = resolve_submit_script(REPO_ROOT).read_text()
+    # All four case arms must be handled explicitly (we branch on $PROBE_RC).
+    assert 'PROBE_RC=$?' in txt
+    # 1 = no-fit must call fail.
+    assert "target partition cannot run this shape" in txt.lower() or \
+           "pick a different -p" in txt
+    # 2 = contested must have a 5s grace.
+    probe_block_start = txt.index("[5/6] cluster probe")
+    probe_block_end = txt.index("[6/6] sbatch --test-only")
+    probe_block = txt[probe_block_start:probe_block_end]
+    assert "fully allocated right now" in probe_block
+    assert "read -r -t 5" in probe_block
+    # 3 = probe failed must NOT block; it warns and falls through.
+    assert "couldn't query scontrol" in probe_block
+
+
+def test_submit_sh_forwards_overrides_to_probe():
+    """CLI overrides (--mem, --cpus-per-task, --gres=gpu:N) must be forwarded
+    to the probe so it evaluates the real request, not the slurm-header
+    defaults."""
+    txt = resolve_submit_script(REPO_ROOT).read_text()
+    probe_start = txt.index("[5/6] cluster probe")
+    probe_end = txt.index("[6/6] sbatch --test-only")
+    probe_block = txt[probe_start:probe_end]
+    # Mem override forwarded.
+    assert '--mem=*)' in probe_block and 'PROBE_ARGS+=("--mem"' in probe_block
+    # Cpus override forwarded.
+    assert '--cpus-per-task=*)' in probe_block and 'PROBE_ARGS+=("--cpus"' in probe_block
+    # GPU count forwarded.
+    assert 'PROBE_ARGS+=("--gpus"' in probe_block
+
+
+def test_cluster_probe_script_exists_and_is_executable_python():
+    """The probe must live at scripts/cluster_probe.py and parse as valid
+    Python. We don't import it (stdlib-only by design — no mt_metrix
+    coupling), just syntax-check via ``python -c``."""
+    import subprocess
+    probe = REPO_ROOT / "scripts" / "cluster_probe.py"
+    assert probe.is_file(), "scripts/cluster_probe.py must exist"
+    # Validate with -m py_compile, which raises SyntaxError if malformed.
+    res = subprocess.run(
+        ["python3", "-m", "py_compile", str(probe)],
+        capture_output=True, text=True,
+    )
+    assert res.returncode == 0, f"cluster_probe.py failed py_compile: {res.stderr}"

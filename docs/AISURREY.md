@@ -79,7 +79,7 @@ Visit each model page on HuggingFace Hub and click "Agree and access".
 ## Submitting jobs — the canonical path
 
 **`scripts/submit.sh` is the only supported submit path.** It wraps
-`sbatch` with five pre-flight checks (see
+`sbatch` with six pre-flight checks (see
 `aisurrey-deploy.md#pre-flight-checklist`):
 
 ```bash
@@ -94,6 +94,35 @@ overrides.
 
 The wrapper auto-adds `--exclude=aisurrey26` and sets `--job-name` to the
 config's basename (so logs end up at `logs/slurm_<jobid>_<config>.out`).
+
+Pre-flight step [5/6] is a **cluster probe** (`scripts/cluster_probe.py`).
+It parses `scontrol show node -o` to build a live per-partition picture
+of free GPU capacity, infers VRAM need from the config's scorers, and
+flags the target partition as:
+
+- **READY** — free GPUs right now, proceed.
+- **CONTESTED** — shape fits but no free GPUs this instant; the probe
+  recommends a wide-open alternative and submit.sh gives you a 5s grace
+  to Ctrl-C and re-submit with `-p <alternative>`. On AISURREY, `sbatch`
+  rejects (does NOT queue) when the partition has zero free GPUs, so
+  this warning is load-bearing: proceeding anyway risks a hard refusal
+  at the scheduler.
+- **NO-FIT** — no node in the partition can ever run this (e.g. asking
+  for 80 GB VRAM on `nice-project`'s 48 GB L40s). Hard fail.
+
+The probe is standalone (stdlib only) and can be run ad-hoc to survey
+the cluster:
+
+```bash
+# Survey everything using the full-matrix config's inferred VRAM need:
+python3 scripts/cluster_probe.py \
+    --config configs/runs/surrey_legal_full_matrix.yaml
+
+# JSON for scripting:
+python3 scripts/cluster_probe.py \
+    --config configs/runs/surrey_legal_tower72b.yaml \
+    --partition a100 --gpus 4 --json
+```
 
 ## Right-sizing: pick the smallest GPU that fits
 
@@ -250,6 +279,14 @@ mt-metrix correlate --run $SCRATCH/outputs/<run_id>
   `pip install -e ".[tower]"` or remove Tower scorers from the run.
 - **Job stuck in `PD` forever** → `a100` queue is full. `sinfo -p a100`
   and consider a 48 GB alternative (`-p rtx_a6000_risk`).
+- **`sbatch: error: Batch job submission failed: Requested node
+  configuration is not available`** → the target partition has zero free
+  GPUs right now AND AISURREY rejects rather than queues (unlike most
+  SLURM clusters). Run the cluster probe to pick an alternative:
+  `python3 scripts/cluster_probe.py --config <your config>`. It prints
+  every partition's free GPU count and recommends a wide-open one.
+  `scripts/submit.sh` now runs this as pre-flight [5/6] so you see the
+  recommendation before the hard refusal.
 - **Job exits `1:0` with no traceback** → suspect node. `submit.sh`
   excludes `aisurrey26`; if it still happens, check
   `sacct -j <id> --format=JobID,State,ExitCode,NodeList`.

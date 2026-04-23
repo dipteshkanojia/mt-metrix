@@ -50,10 +50,10 @@ Don't improvise cluster ops — read these first, in order:
   pre-flight checks every submission runs through.
 
 **Canonical submit path: `scripts/submit.sh` — no exceptions.** It runs
-five pre-flight checks (partition sanity, conda env present, no
-duplicate job, `sbatch --test-only` validation) and adds
-`--exclude=aisurrey26` automatically. Direct `sbatch` invocation is
-deprecated.
+six pre-flight checks (partition sanity, conda env present, no
+duplicate job, cluster probe for live capacity + VRAM fit, `sbatch
+--test-only` validation) and adds `--exclude=aisurrey26` automatically.
+Direct `sbatch` invocation is deprecated.
 
 ```
 scripts/submit.sh configs/runs/surrey_legal_cometkiwi.yaml

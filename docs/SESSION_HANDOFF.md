@@ -22,8 +22,9 @@ and an AISURREY SLURM submission path.
 - **Tests:** 82 passing, 1 slow-skipped (COMET download). `pytest tests/`
   runs in ~3 s.
 - **Cluster deploy:** `scripts/submit.sh` is the only path. It wraps
-  `sbatch` with five pre-flight checks (partition exists and is not the
-  nonexistent `gpu`, conda env present, no duplicate job, `sbatch
+  `sbatch` with six pre-flight checks (partition exists and is not the
+  nonexistent `gpu`, conda env present, no duplicate job, cluster probe
+  `scripts/cluster_probe.py` for live capacity + VRAM fit, `sbatch
   --test-only` accepts the plan) and adds `--exclude=aisurrey26`. Direct
   `sbatch` invocation is deprecated — every failure mode we've hit before
   is re-caught by the wrapper.
@@ -86,9 +87,11 @@ the script just updates + re-runs the smoke tests. Idempotent.
 
 ## Cluster submission discipline — DO NOT SKIP
 
-**Preferred path: `scripts/submit.sh`.** It runs five pre-flight checks,
-calls `sbatch --test-only`, and adds `--exclude=aisurrey26` automatically.
-Fails fast on the common mistakes:
+**Preferred path: `scripts/submit.sh`.** It runs six pre-flight checks
+(including a live cluster probe — `scripts/cluster_probe.py` — that shows
+free GPU counts per partition and recommends alternatives when the
+target is contested), calls `sbatch --test-only`, and adds
+`--exclude=aisurrey26` automatically. Fails fast on the common mistakes:
 
 - partition = `gpu` (doesn't exist on AISURREY)
 - env casing (the env is `mt-metrix` — check `conda env list`)
@@ -189,7 +192,8 @@ Global (applies to any AISURREY project):
 - `~/Documents/Claude/agent-context/aisurrey-cluster.md` — cluster-wide
   ops (filesystem, torch pin, node reliability, SLURM patterns).
 - `~/Documents/Claude/agent-context/aisurrey-deploy.md` — deploy SOP
-  (five pre-flight checks, submit.sh template, right-sizing).
+  (six pre-flight checks including the live cluster probe, submit.sh
+  template, right-sizing).
 
 Project-specific (read first before non-trivial changes):
 
