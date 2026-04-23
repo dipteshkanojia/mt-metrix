@@ -1257,8 +1257,27 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         return 1
 
-    recommended_name, alternatives = pick_recommended(partitions, fits, req)
-    # Legacy alias kept for the current rendering block; Task 6 replaces
+    # Blocklist rejection. A blocklisted partition is a hard NO — no
+    # prompt, no sbatch; user must pick something else. submit.sh
+    # surfaces the exit code; here we just print + exit 5.
+    if is_blocklisted(req.partition):
+        msg = (
+            f"partition '{req.partition}' is in the cluster-probe "
+            f"blocklist (belongs to another faculty/group). Pick a "
+            f"different partition."
+        )
+        if args.json:
+            print(json.dumps({"error": msg, "blocklist": sorted(PARTITIONS_BLOCKLIST)}, indent=2))
+        else:
+            print(f"cluster_probe: {msg}", file=sys.stderr)
+            # Still print the survey so the user sees what they could use.
+            print()
+            print(render_table(partitions, fits, req, colour=(not args.no_colour) and sys.stdout.isatty()))
+        return 5
+
+    pick_recommended_result = pick_recommended(partitions, fits, req)
+    recommended_name, alternatives = pick_recommended_result
+    # Legacy alias kept for the current rendering block; Task 8 replaces
     # the downstream behaviour with full alternative-list rendering.
     recommended = (
         recommended_name
@@ -1334,6 +1353,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"  → {req.partition}: READY — proceed with pre-flight.")
 
     # Exit code policy.
+    # 4 (nothing fits anywhere) takes precedence over 1/2: if we can't
+    # recommend any partition at all, the user's config is broken regardless
+    # of which target they named.
+    if not alternatives and not target_fit.shape_ok:
+        return 4
     if not target_fit.shape_ok:
         return 1
     if not target_fit.has_capacity_now:

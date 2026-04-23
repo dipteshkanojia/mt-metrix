@@ -1298,3 +1298,53 @@ def test_estimate_wait_s_unknown_when_no_running_jobs(probe):
     with 0."""
     p = _make_partition(probe, gpus_total=1, gpus_alloc=1)
     assert probe.estimate_wait_s(p, gpus_requested=1) is None
+
+
+# ---------------------------------------------------------------------------
+# Exit codes: blocklisted target + nothing-fits
+# ---------------------------------------------------------------------------
+
+def test_main_blocklisted_target_exit_five(probe, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(probe, "run_scontrol_show_node", lambda: SCONTROL_FIXTURE)
+    monkeypatch.setattr(probe, "run_squeue", lambda: "")
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("scorers:\n  - ref: comet/wmt22-cometkiwi-da\n")
+    rc = probe.main([
+        "--config", str(cfg),
+        "--partition", "cogvis-project", "--gpus", "1",
+        "--slurm-script", "/dev/null",
+        "--no-colour",
+    ])
+    assert rc == 5
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    # The rejection message names the partition and mentions blocklist.
+    assert "cogvis-project" in out
+    assert "blocklist" in out.lower()
+
+
+def test_main_nothing_fits_exit_four(probe, monkeypatch, capsys, tmp_path):
+    """Force every partition to fail shape (oversize mem) → exit 4."""
+    monkeypatch.setattr(probe, "run_scontrol_show_node", lambda: SCONTROL_FIXTURE)
+    monkeypatch.setattr(probe, "run_squeue", lambda: "")
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("scorers:\n  - ref: comet/wmt22-cometkiwi-da\n")
+    rc = probe.main([
+        "--config", str(cfg),
+        "--partition", "a100", "--gpus", "1",
+        "--mem", "999999G",   # enormous → no node qualifies
+        "--slurm-script", "/dev/null",
+        "--no-colour",
+    ])
+    assert rc == 4
+
+
+def test_main_probe_exit_three_preserved(probe, monkeypatch):
+    """scontrol unavailable still returns 3, same as before."""
+    monkeypatch.setattr(probe, "run_scontrol_show_node", lambda: None)
+    rc = probe.main([
+        "--partition", "a100",
+        "--slurm-script", "/dev/null",
+        "--no-colour",
+    ])
+    assert rc == 3
