@@ -16,36 +16,68 @@
 # from the config filename (set by submit.sh) or default to the script name.
 #
 # AISURREY partition cheat-sheet (verify live with `sinfo`):
-#   a100            A100-80GB,   3-day limit. Headline partition.
-#   rtx8000         Quadro 48GB, 3-day limit. A100 backup.
-#   rtx_a6000_risk  RTX A6000 48GB, preemptible. Good A100 alternative for <48GB.
-#   l40s_risk       L40S 48GB, preemptible. Modern Ada.
-#   3090 / 3090_risk RTX 3090 24GB. Smoke + small ablations.
-#   2080ti          RTX 2080Ti 11GB. Catch-all; avoid for training.
+#   nice-project    2× L40s 48 GB, 3-day limit. NICE-GROUP RESERVED — this is
+#                   our default. Zero queue wait, 16 CPU + 128 GB RAM per
+#                   node. Covers every full-matrix scorer EXCEPT Tower-72B
+#                   (which needs tp=4 on a100) at the right batch sizes.
+#   a100            A100 80 GB, 3-day limit. Headline / Tower-72B only —
+#                   ~2.2× fairshare weight vs 3090, reserve for what
+#                   genuinely needs >48 GB or publication runs.
+#   rtx8000         Quadro 48 GB, 3-day limit. Fallback when nice-project full.
+#   rtx_a6000_risk  RTX A6000 48 GB, preemptible. 48 GB fallback.
+#   l40s_risk       L40S 48 GB, preemptible. Same silicon as nice-project but
+#                   preemptible — prefer nice-project first.
+#   3090 / 3090_risk RTX 3090 24 GB. Smoke + small ablations.
+#   2080ti          RTX 2080 Ti 11 GB. Catch-all; avoid for training.
 #   debug           4-hour cap. Quick sanity checks.
 # There is NO partition called `gpu` — every sbatch line must name one
 # explicitly.
 #
-# Right-size the GPU: COMET-base / CometKiwi-DA / BLEU all fit on 24 GB.
-# CometKiwi-XL needs ~40 GB (48 GB card). Tower-7B inference fits on a 48 GB
-# card with vLLM; Tower-13B fits on 2× 48 GB or 1× A100. Only Tower-72B and
-# COMET-XXL actually need A100. Check summary.json::peak_gpu_memory_gb from
-# a prior run to pick the smallest partition that covers your workload.
+# Right-size the GPU by scorer family:
+#   sacrebleu (CPU)                       any partition; pin 1 GPU anyway
+#   COMET-base / Kiwi-DA (~1.5 GB)        nice-project at batch=64
+#   COMET-XL / XCOMET-XL (3.5B, ~7 GB)    nice-project at batch=16
+#   COMET-XXL / XCOMET-XXL (10.7B, ~22 GB) nice-project at batch=4 (auto-
+#                                         downshift from catalogue's 8) OR
+#                                         a100 at batch=8 for speed.
+#   Tower-2B / 7B / Mistral-7B            nice-project tp=1 (or transformers)
+#   Tower-9B (18 GB fp16)                 nice-project tp=1
+#   Tower-13B (26 GB fp16)                nice-project tp=1 on a single L40s
+#   Tower-72B (144 GB fp16)               a100 gpu:4 tp=4 — SEPARATE SUBMIT,
+#                                         will be skipped on any other config
+# Check `summary.json::peak_gpu_memory_gb` from a prior run to right-size.
 #
-# Right-size CPU RAM (--mem) — this is separate from GPU VRAM and was the
-# root cause of the 2026-04-19 matrix OOMs. unbabel-comet + pytorch-lightning
+# Right-size CPU RAM (--mem) — separate from GPU VRAM and the root cause
+# of the 2026-04-19 matrix OOMs. unbabel-comet + pytorch-lightning
 # materialise the full model in CPU RAM first, then move it to GPU. Plan:
 #   sacrebleu / CometKiwi-DA (~1.5 GB) / Tower-2B (vllm):   32 GB covers it
 #   CometKiwi-XL / XCOMET-XL-QE (~12 GB) / Tower-7B:        64 GB baseline
 #   CometKiwi-XXL / XCOMET-XXL-QE (~40 GB fp32 state dict)  128 GB default
-#   Full matrix (xxl + Tower-13B) / Tower-72B-awq:          256 GB override
-# 128 GB is the safe default for any single scorer including XXL. Decoder-heavy
-# or full-matrix jobs should override with `--mem=256G` at submit time. Watch
-# for `slurmstepd: Detected 1 oom_kill event` with NO CUDA traceback — that's
+#   Full matrix (xxl + Tower-13B) / Tower-72B:              256 GB override
+# 128 GB is the safe default for any single scorer including XXL. Full-matrix
+# runs should override with `--mem=256G` at submit time. Watch for
+# `slurmstepd: Detected 1 oom_kill event` with NO CUDA traceback — that's
 # the kernel OOM killer enforcing this cgroup limit.
+#
+# Common submit patterns:
+#   # Default: nice-project, 1 GPU (L40s 48 GB), 128 GB RAM. Works for
+#   # every full-matrix scorer except Tower-72B.
+#   scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml
+#
+#   # Full-matrix with XXL COMET + Tower-13B — same partition, bigger mem:
+#   scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml --mem=256G
+#
+#   # Tower-72B follow-up (ONLY partition where it fits, tp=4):
+#   scripts/submit.sh configs/runs/surrey_legal_tower72b.yaml \
+#       -p a100 --gres=gpu:4 --mem=256G
+#
+#   # Headline / paper-quality on A100 80 GB (keeps XXL COMET at batch=8
+#   # instead of the nice-project downshift to 4):
+#   scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml \
+#       -p a100 --gres=gpu:1 --mem=256G
 
-#SBATCH --partition=a100             # override with -p on the CLI
-#SBATCH --gres=gpu:1                 # override with --gres=gpu:N
+#SBATCH --partition=nice-project     # NICE-group dedicated 2× L40s 48 GB; override with -p on CLI
+#SBATCH --gres=gpu:1                 # override with --gres=gpu:N (N=4 only for Tower-72B on a100)
 #SBATCH --cpus-per-task=8            # dataloader workers
 #SBATCH --mem=128G                   # CPU RAM floor for XXL COMET load; 256G for full matrix + Tower-13B+
 #SBATCH --time=24:00:00              # 24h; most runs finish in <4h

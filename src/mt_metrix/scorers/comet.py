@@ -94,7 +94,20 @@ class CometScorer:
             samples.append(sample)
 
         params = self._cfg.params
-        batch_size = int(params.get("batch_size", 16))
+        configured_batch_size = int(params.get("batch_size", 16))
+        batch_size = _resolve_xxl_batch_size(
+            self._cfg.model, configured_batch_size, _detected_vram_gb()
+        )
+        if batch_size != configured_batch_size:
+            log.warning(
+                "COMET model %s: auto-downshifted batch_size %d -> %d because "
+                "detected VRAM is below the 60 GB XXL threshold (48 GB L40s OOMs "
+                "at batch=8; use A100 80 GB to keep the full batch). Override by "
+                "running on an 80 GB card or forcing batch_size explicitly.",
+                self._cfg.model,
+                configured_batch_size,
+                batch_size,
+            )
         gpus = int(params.get("gpus", 1))
         num_workers = int(params.get("num_workers", 2))
         progress_bar = bool(params.get("progress_bar", True))
@@ -173,6 +186,76 @@ class CometScorer:
 
 def _is_xcomet(model_id: str | None) -> bool:
     return bool(model_id) and "xcomet" in model_id.lower()
+
+
+def _is_xxl(model_id: str | None) -> bool:
+    """Catch every XXL COMET/XCOMET variant by the ``xxl`` substring."""
+    return bool(model_id) and "xxl" in model_id.lower()
+
+
+def _detected_vram_gb() -> float | None:
+    """Return the smallest per-device VRAM in GiB across visible CUDA devices,
+    or ``None`` if no device is available (CPU-only run, no torch, etc.).
+
+    We pick the minimum rather than the total so mixed-GPU nodes still get
+    a safe answer — batch_size is bounded by the smallest card.
+    """
+    try:
+        import torch
+    except ImportError:  # pragma: no cover — torch is a hard dep
+        return None
+    if not torch.cuda.is_available():
+        return None
+    try:
+        n = torch.cuda.device_count()
+        if n == 0:
+            return None
+        return min(
+            torch.cuda.get_device_properties(i).total_memory / (1024**3)
+            for i in range(n)
+        )
+    except Exception:  # pragma: no cover — defensive
+        return None
+
+
+# 60 GiB is the empirical XXL cut-off: a 48 GiB L40s OOMs at batch=8 with
+# XCOMET-XXL / CometKiwi-XXL (XXL-QE peaks at ~41 GiB in fp32 state-dict load
+# before moving to GPU, then grows with batch*seq_len during predict); an
+# 80 GiB A100 sits comfortably there. Anything in between is treated as a
+# safer downshift target — we haven't seen a 60-80 GiB card in production
+# on AISURREY, but if one turns up we'd rather err toward the smaller batch.
+_XXL_FULL_BATCH_VRAM_GB_THRESHOLD: float = 60.0
+_XXL_SAFE_BATCH_SIZE: int = 4
+
+
+def _resolve_xxl_batch_size(
+    model_id: str | None,
+    configured_batch_size: int,
+    vram_gb: float | None,
+) -> int:
+    """Auto-downshift XXL COMET batch_size on <60 GiB cards.
+
+    Rationale: the catalogue defaults XXL COMET/XCOMET to batch=8 (paper
+    recommendation for 80 GiB A100). On a 48 GiB L40s / RTX8000 the
+    pytorch-lightning predict step OOMs at batch=8 with XCOMET-XXL and
+    CometKiwi-XXL; batch=4 is safe. Instead of forcing users to override
+    batch_size per partition, we detect the real VRAM at runtime and step
+    down to 4 transparently. Users on A100 80 GiB get the full batch=8.
+
+    * Non-XXL models are returned unchanged.
+    * If the user already asked for batch<=4, we respect that (don't upshift).
+    * If VRAM detection fails (CPU-only, no torch, weird runtime), we trust
+      the config — no surprise downshifts.
+    """
+    if not _is_xxl(model_id):
+        return configured_batch_size
+    if configured_batch_size <= _XXL_SAFE_BATCH_SIZE:
+        return configured_batch_size
+    if vram_gb is None:
+        return configured_batch_size
+    if vram_gb >= _XXL_FULL_BATCH_VRAM_GB_THRESHOLD:
+        return configured_batch_size
+    return _XXL_SAFE_BATCH_SIZE
 
 
 class UnsupportedMarianCheckpointError(RuntimeError):

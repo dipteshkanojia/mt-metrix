@@ -26,8 +26,11 @@ Everything below is explanation of what those commands do and why.
 From `aisurrey-cluster.md` / `aisurrey-deploy.md`:
 
 - **No `gpu` partition exists.** Every sbatch line must name a real
-  partition. Defaults to `a100`; see the cheat-sheet in
-  `scripts/run_mt_metrix.slurm`.
+  partition. Defaults to `nice-project` (NICE-group dedicated 2× L40s
+  48 GB, 128 GB CPU RAM, effectively zero queue contention); see the
+  cheat-sheet in `scripts/run_mt_metrix.slurm`. `a100` is reserved for
+  the Tower-72B follow-up (`configs/runs/surrey_legal_tower72b.yaml`)
+  and headline / paper-quality runs — override with `-p a100 --gres=gpu:N`.
 - **`aisurrey26` is flaky** (silent `1:0` exits, 2026-04).
   `scripts/submit.sh` adds `--exclude=aisurrey26` to every submission.
 - **`/vol/research/...` is login-only, invisible to compute nodes.**
@@ -94,7 +97,10 @@ config's basename (so logs end up at `logs/slurm_<jobid>_<config>.out`).
 
 ## Right-sizing: pick the smallest GPU that fits
 
-`a100` is the default, but often overkill. After your first run, check
+`nice-project` is the default because it's our group's dedicated
+2× L40s 48 GB node (zero queue wait) and covers every full-matrix
+scorer except Tower-72B. `a100` is reserved for the 72B follow-up and
+publication runs. After your first run, check
 `outputs/<run_id>/summary.json::peak_gpu_memory_gb` and use the cheapest
 partition that covers it:
 
@@ -102,19 +108,25 @@ partition that covers it:
 |-------------|-----------------------------------|----------------------|
 | ≤ 10 GB     | `2080ti` (11 GB)                  | `-p 2080ti`          |
 | ≤ 22 GB     | `3090` / `3090_risk` (24 GB)      | `-p 3090_risk`       |
-| ≤ 44 GB     | `rtx8000` / `rtx_a6000_risk` / `l40s_risk` (48 GB) | `-p rtx_a6000_risk` |
-| ≤ 76 GB     | `a100` (80 GB)                    | default              |
+| ≤ 44 GB     | `nice-project` (2× L40s 48 GB, default) / `rtx8000` / `rtx_a6000_risk` / `l40s_risk` | default / `-p rtx_a6000_risk` |
+| ≤ 76 GB     | `a100` (80 GB)                    | `-p a100`            |
 
 Approximate mt-metrix sizing (verify with `summary.json::peak_gpu_memory_gb`):
 
 - BLEU / chrF++ / TER: CPU-only — use any partition.
 - COMET-base / CometKiwi-DA: <10 GB — fits on 2080ti, but queue is slow;
-  3090 is usually faster end-to-end.
+  3090 or nice-project are usually faster end-to-end.
 - CometKiwi-XL / XCOMET-XL: ~20 GB — 3090 works, 48 GB card is cosier.
-- CometKiwi-XXL / XCOMET-XXL: ~40 GB — 48 GB card minimum.
-- Tower-7B (vLLM): ~18 GB — 3090 works.
-- Tower-13B (vLLM): ~28 GB — 48 GB card.
-- Tower-Plus-72B: needs A100 with `--gres=gpu:2+` and a tensor-parallel vLLM config.
+- CometKiwi-XXL / XCOMET-XXL: ~40 GB peak; catalogue default is
+  `batch_size: 8` which OOMs on 48 GB L40s. The COMET scorer
+  auto-downshifts to `batch_size: 4` on <60 GB cards at runtime
+  (`_resolve_xxl_batch_size` in `scorers/comet.py`) and leaves
+  `batch_size: 8` intact on A100 80 GB. No config change needed.
+- Tower-2B / 7B / Mistral-7B (vLLM or HF): fits nice-project at tp=1.
+- Tower-9B / 13B (vLLM): ~18 GB / ~26 GB fp16 — fits nice-project at tp=1.
+- Tower-Plus-72B: 144 GB fp16 — genuinely needs `-p a100 --gres=gpu:4`
+  with tp=4. Use `configs/runs/surrey_legal_tower72b.yaml` as the
+  follow-up run once the nice-project full-matrix job has landed.
 
 **4-GPU soft cap.** `submit.sh` warns if you request >4 GPUs — getting 8
 on one node is effectively impossible due to contention.
@@ -178,8 +190,13 @@ conda activate /mnt/fast/nobackup/scratch4weeks/$USER/mt-metrix/conda_env
 # all four Surrey domain matrices (legal / general / tourism / health)
 scripts/submit_aisurrey.sh
 
-# or one at a time, with a partition override:
-scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml -p a100
+# or one at a time (default partition is nice-project; full-matrix
+# + XXL COMET + Tower-13B wants 256G CPU RAM):
+scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml --mem=256G
+
+# Tower-72B follow-up (the ONLY partition where it fits, tp=4):
+scripts/submit.sh configs/runs/surrey_legal_tower72b.yaml \
+    -p a100 --gres=gpu:4 --mem=256G
 ```
 
 Monitor:
@@ -206,9 +223,14 @@ mt-metrix correlate --run $SCRATCH/outputs/<run_id>
 - **`401 Unauthorized` on model download** → HF token missing or licence
   not accepted for that model. `cat ~/.hf_token`, then visit the model
   page on HF and accept.
-- **`torch.cuda.OutOfMemory` on CometKiwi-XXL** → add
-  `overrides: {batch_size: 4}` (or 2) to that scorer entry in the run
-  config.
+- **`torch.cuda.OutOfMemory` on CometKiwi-XXL** → the scorer should
+  auto-downshift to `batch_size: 4` on <60 GB cards. If you're still
+  OOMing (e.g. on a 24 GB 3090 even at batch=4), add
+  `overrides: {batch_size: 2}` (or 1) to that scorer entry in the run
+  config. On A100 80 GB no override is needed — batch=8 runs as-is.
+- **`slurmstepd: Detected 1 oom_kill event` with no CUDA traceback** →
+  cgroup / host-RAM OOM. Bump `--mem` (default is 128 GB; full-matrix
+  with XXL COMET + Tower-13B+ wants `--mem=256G`).
 - **`ImportError: vllm`** → installed without `[tower]` extra. Run
   `pip install -e ".[tower]"` or remove Tower scorers from the run.
 - **Job stuck in `PD` forever** → `a100` queue is full. `sinfo -p a100`

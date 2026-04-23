@@ -85,7 +85,13 @@ models:
   wmt23-cometkiwi-da-xxl:
     model: Unbabel/wmt23-cometkiwi-da-xxl
     needs_reference: false
-    notes: "CometKiwi-XXL (WMT23) — XLM-R-XXL 10.7B. Gated."
+    notes: |
+      CometKiwi-XXL (WMT23) — XLM-R-XXL 10.7B. Gated.
+      batch_size=8 is the A100 80 GB target; on 48 GB cards (L40s,
+      RTX8000, A6000) the scorer auto-downshifts to batch_size=4 at
+      runtime — see ``_resolve_xxl_batch_size`` in scorers/comet.py.
+      Don't lower this manually unless you have a specific reason; the
+      runtime check is driver-aware.
     params:
       batch_size: 8
       gpus: 1
@@ -154,7 +160,10 @@ models:
   xcomet-xxl:
     model: Unbabel/XCOMET-XXL
     needs_reference: true
-    notes: "XCOMET-XXL — explainable reference-based metric. Gated."
+    notes: |
+      XCOMET-XXL — explainable reference-based metric. Gated.
+      batch_size=8 is the A100 80 GB target; on 48 GB cards the scorer
+      auto-downshifts to 4 at runtime (``_resolve_xxl_batch_size``).
     params:
       batch_size: 8
       gpus: 1
@@ -179,7 +188,10 @@ models:
   xcomet-xxl-qe:
     model: Unbabel/XCOMET-XXL
     needs_reference: false
-    notes: "XCOMET-XXL in QE mode (no reference)."
+    notes: |
+      XCOMET-XXL in QE mode (no reference).
+      batch_size=8 targets A100 80 GB; on 48 GB cards the scorer
+      auto-downshifts to 4 at runtime (``_resolve_xxl_batch_size``).
     params:
       batch_size: 8
       gpus: 1

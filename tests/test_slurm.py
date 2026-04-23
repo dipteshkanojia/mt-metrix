@@ -176,11 +176,19 @@ def test_run_slurm_has_hf_cache_redirect():
     assert "HF_DATASETS_CACHE=" in txt
 
 
-def test_run_slurm_has_a100_default_partition():
+def test_run_slurm_has_nice_project_default_partition():
     txt = resolve_run_slurm_script(REPO_ROOT).read_text()
-    # Default must be a real partition, not "gpu" (aisurrey-deploy.md rule #1)
-    assert "#SBATCH --partition=a100" in txt
+    # Default must be a real partition, not "gpu" (aisurrey-deploy.md rule #1).
+    # Changed a100 -> nice-project on 2026-04-23: nice-project is NICE-group
+    # dedicated (2× L40s 48 GB, zero queue contention) and covers every
+    # full-matrix scorer except Tower-72B, which has its own dedicated
+    # config (configs/runs/surrey_legal_tower72b.yaml) that overrides
+    # -p a100 --gres=gpu:4 at submit time.
+    assert "#SBATCH --partition=nice-project" in txt
     assert "--partition=gpu" not in txt
+    # Defensive: a100 should NOT be the default any more — it's reserved
+    # for the Tower-72B follow-up only.
+    assert "#SBATCH --partition=a100" not in txt
 
 
 def test_run_slurm_activates_scratch_prefix_env():

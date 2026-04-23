@@ -103,12 +103,20 @@ models:
       Slower than vLLM-backed Tower peers (rough order-of-magnitude:
       ~30 min/domain at batch_size=8 vs ~5 min for vLLM). Acceptable
       for a single scorer; revisit if a vLLM upgrade unblocks us.
+
+      batch_size=16: Mistral-7B fp16 ≈ 14 GB; GEMBA-DA output is
+      max_tokens=50 so KV cache growth per step is small. On a 48 GB
+      L40s this leaves ~30 GB headroom even with fragmentation, ~60 GB
+      on A100. Bumped from 8 → 16 on 2026-04-23 to roughly halve the
+      transformers-backend wall time; if you see a CUDA OOM in future
+      (e.g. MQM prompt where max_tokens=384), override in the run
+      config with ``batch_size: 8`` in the scorer params.
     params:
       prompt_mode: gemba-da
       backend: transformers
       temperature: 0.0
       max_tokens: 50
-      batch_size: 8
+      batch_size: 16
 
   towerinstruct-wmt24-chat-7b:
     model: Unbabel/TowerInstruct-WMT24-Chat-7B
