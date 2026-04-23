@@ -366,6 +366,97 @@ class Node:
         return max(free, 0)
 
 
+# ---------------------------------------------------------------------------
+# squeue reader. Emits ``Job`` dataclasses for every running or pending
+# job. The recommender uses these to estimate wait time per partition
+# rather than blindly trusting "free GPUs now" — a partition with 0 free
+# and 30 short-running jobs is different from 0 free + 1 long-running.
+#
+# Format string is kept in sync with parse_squeue_line's field order.
+# squeue emits empty strings when a field is N/A; the parser turns those
+# into None so callers don't have to special-case each one.
+# ---------------------------------------------------------------------------
+
+SQUEUE_FORMAT = "%i|%P|%T|%L|%M|%r|%b|%D|%u"
+
+_SQUEUE_GRES_GPU_RE = re.compile(r"gpu(?::[a-zA-Z0-9_]+)?:(\d+)")
+
+
+@dataclass
+class Job:
+    """One row from ``squeue --noheader --format=...``.
+
+    ``time_left_s`` and ``time_used_s`` are ``None`` for pending jobs
+    (squeue prints ``N/A``) and for jobs with ``UNLIMITED`` wall clock;
+    the recommender treats ``None`` as "worse than any finite value" so
+    unknown-duration running jobs don't shrink wait estimates.
+    """
+
+    job_id: str
+    partition: str
+    state: str                # RUNNING, PENDING, COMPLETING, CONFIGURING, ...
+    time_left_s: Optional[int]
+    time_used_s: Optional[int]
+    num_gpus: int
+    reason: str
+    user: str
+
+
+def parse_squeue_line(line: str) -> Optional[Job]:
+    """Parse a single ``squeue`` line into a :class:`Job`.
+
+    Returns ``None`` if the line has fewer than the 9 expected fields or
+    cannot be unambiguously parsed. Callers can safely iterate over all
+    lines in the output and drop ``None`` entries.
+    """
+    if not line or "|" not in line:
+        return None
+    parts = line.split("|")
+    if len(parts) < 9:
+        return None
+    job_id, partition, state, time_left, time_used, reason, tres, _nodes, user = parts[:9]
+    if not job_id or not partition:
+        return None
+    num_gpus = 0
+    if tres:
+        m = _SQUEUE_GRES_GPU_RE.search(tres)
+        if m:
+            num_gpus = int(m.group(1))
+    return Job(
+        job_id=job_id.strip(),
+        partition=partition.strip(),
+        state=state.strip().upper(),
+        time_left_s=parse_time_duration(time_left),
+        time_used_s=parse_time_duration(time_used),
+        num_gpus=num_gpus,
+        reason=reason.strip(),
+        user=user.strip(),
+    )
+
+
+def run_squeue() -> Optional[str]:
+    """Run ``squeue --noheader --format=...`` and return its stdout.
+
+    ``None`` if squeue isn't on PATH or returns non-zero — the
+    recommender falls back to tier-only scoring without wait estimates.
+    Mirrors ``run_scontrol_show_node`` for consistency.
+    """
+    if shutil.which("squeue") is None:
+        return None
+    try:
+        res = subprocess.run(
+            ["squeue", "--noheader", f"--format={SQUEUE_FORMAT}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if res.returncode != 0:
+        return None
+    return res.stdout
+
+
 def _normalise_state(raw: str) -> tuple[str, bool]:
     """State field can be ``MIXED+DRAIN`` or ``IDLE``. Return (primary, usable)."""
     if not raw:

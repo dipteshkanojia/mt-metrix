@@ -869,3 +869,79 @@ def test_main_json_output_structure(probe, monkeypatch, capsys, tmp_path):
     part_names = {p["name"] for p in payload["partitions"]}
     assert {"nice-project", "a100", "3090", "rtx_a6000_risk", "l40s_risk"} \
         <= part_names
+
+
+# ---------------------------------------------------------------------------
+# squeue reader
+# ---------------------------------------------------------------------------
+
+# squeue --noheader --format="%i|%P|%T|%L|%M|%r|%b|%D|%u"
+# Fields: JobID | Partition | State | TimeLeft | TimeUsed | Reason |
+#         tres-per-node | NumNodes | User
+SQUEUE_FIXTURE = "\n".join([
+    # Running, 1× A100, 2h14m left, our user
+    "1234001|a100|RUNNING|2:14:00|3:46:00|None|gres:gpu:1|1|dk0023",
+    # Pending, 4× A100, waiting for resources
+    "1234002|a100|PENDING|N/A|N/A|Resources|gres:gpu:4|1|someone",
+    # Running, 1× L40s, 10h left
+    "1234010|nice-project|RUNNING|10:00:00|1:00:00|None|gres:gpu:1|1|dk0023",
+    # Running, 1× A6000, 2-06:00:00 left (multi-day)
+    "1234020|rtx_a6000_risk|RUNNING|2-06:00:00|6:00:00|None|gres:gpu:1|1|someone",
+    # Pending with UNLIMITED time — legit on some admin jobs
+    "1234030|rtx_a6000_risk|PENDING|UNLIMITED|N/A|Priority|gres:gpu:1|1|someone",
+    # Malformed: missing fields → must skip without crash
+    "GARBAGE LINE",
+    # Valid but job has no gres (CPU job) — num_gpus=0
+    "1234099|debug|RUNNING|0:10:00|0:05:00|None|cpu=4|1|dk0023",
+])
+
+
+def test_parse_squeue_line_running_a100(probe):
+    line = SQUEUE_FIXTURE.splitlines()[0]
+    j = probe.parse_squeue_line(line)
+    assert j is not None
+    assert j.job_id == "1234001"
+    assert j.partition == "a100"
+    assert j.state == "RUNNING"
+    assert j.time_left_s == 2 * 3600 + 14 * 60
+    assert j.time_used_s == 3 * 3600 + 46 * 60
+    assert j.num_gpus == 1
+    assert j.reason == "None"
+    assert j.user == "dk0023"
+
+
+def test_parse_squeue_line_pending_4gpu(probe):
+    line = SQUEUE_FIXTURE.splitlines()[1]
+    j = probe.parse_squeue_line(line)
+    assert j is not None
+    assert j.state == "PENDING"
+    assert j.time_left_s is None
+    assert j.time_used_s is None
+    assert j.num_gpus == 4
+    assert j.reason == "Resources"
+
+
+def test_parse_squeue_line_multi_day(probe):
+    line = SQUEUE_FIXTURE.splitlines()[3]
+    j = probe.parse_squeue_line(line)
+    assert j.time_left_s == 2 * 86400 + 6 * 3600
+
+
+def test_parse_squeue_line_unlimited(probe):
+    line = SQUEUE_FIXTURE.splitlines()[4]
+    j = probe.parse_squeue_line(line)
+    assert j.time_left_s is None      # UNLIMITED → None
+
+
+def test_parse_squeue_line_garbage_returns_none(probe):
+    assert probe.parse_squeue_line("GARBAGE LINE") is None
+    assert probe.parse_squeue_line("") is None
+    # Too few fields
+    assert probe.parse_squeue_line("123|a100") is None
+
+
+def test_parse_squeue_line_cpu_job_zero_gpus(probe):
+    line = SQUEUE_FIXTURE.splitlines()[6]
+    j = probe.parse_squeue_line(line)
+    assert j is not None
+    assert j.num_gpus == 0
