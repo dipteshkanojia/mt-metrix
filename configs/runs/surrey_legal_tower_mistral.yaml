@@ -1,0 +1,35 @@
+# Surrey Legal-QE × Tower-Instruct-Mistral-7B (HF transformers backend).
+#
+# Why a separate config:
+#   Mistral-backbone Tower variant runs on HF transformers rather than
+#   vLLM — vLLM 0.6.3's Llama path crashes at LlamaAttention.__init__
+#   (head_dim=None). See configs/models/tower.yaml for the full trace.
+#   It's a 1-GPU scorer (~14 GB fp16) at batch_size=16, ~30 min per
+#   domain. The full-matrix and all_tower configs nominally include it
+#   but the backend-split makes it awkward to leave alongside the vLLM
+#   peers; isolating it lets us top up only the missing cell without
+#   re-running the nice-project tail that already landed.
+#
+# Dataset coverage: Legal has three pairs (en-gu / en-ta / en-te).
+# Hi / Mr are not in the dataset and will appear as NA in the tabulate
+# pivot — consistent with the screenshot.
+#
+# Recommended submit on AISURREY:
+#   scripts/submit.sh configs/runs/surrey_legal_tower_mistral.yaml \
+#       -p nice-project --gres=gpu:1 --mem=64G --time=02:00:00
+#
+# Output lands at outputs/surrey_legal_tower_mistral_<ts>/. mt-metrix
+# tabulate merges it into the Legal row alongside any prior Legal
+# outputs automatically.
+
+run:
+  id: surrey_legal_tower_mistral
+
+dataset: !include ../datasets/surrey_legal.yaml
+
+scorers:
+  - ref: tower/towerinstruct-mistral-7b-v0.2
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]

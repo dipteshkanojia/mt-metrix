@@ -1,0 +1,42 @@
+# Surrey Health-QE — Tower-Plus-72B-only follow-up.
+#
+# Why a separate config:
+#   Tower-Plus-72B is 144 GB fp16 and needs tp=4 on A100 80 GB to run
+#   at all. The standard full-matrix configs run on nice-project gpu:1
+#   (48 GB L40s) where the runner skips the 72B scorer with
+#   "required GPUs exceeds placement group size". This config isolates
+#   the 72B variants (DA + MQM) so the expensive a100 gpu:4 slot only
+#   holds these two scorers per job, and lets us defer the run until
+#   queue depth on a100 allows.
+#
+# Dataset coverage: Health has four pairs (en-gu / en-hi / en-mr /
+# en-ta). Te is not in the dataset and will appear as NA in the
+# tabulate pivot — consistent with the screenshot.
+#
+# Recommended execution (the ONLY supported partition/gres combo):
+#   scripts/submit.sh configs/runs/surrey_health_tower72b.yaml \
+#       -p a100 --gres=gpu:4 --mem=256G --time=12:00:00
+#
+# Fairshare note: a100 is ~2.2× weight of 3090 and gpu:4 is a heavy
+# ask. Submit only when the nice-project full-matrix run (minus the
+# 72B) has already landed, and after checking `squeue -p a100` for
+# queue depth.
+#
+# Output convention: writes to outputs/surrey_health_tower72b_<ts>/,
+# which mt-metrix tabulate merges into the Health domain row
+# automatically alongside outputs/surrey_health_full_matrix_<ts>/.
+
+run:
+  id: surrey_health_tower72b
+
+dataset: !include ../datasets/surrey_health.yaml
+
+scorers:
+  # Tower-Plus-72B — GEMBA-DA prompt (single-float score).
+  - ref: tower/tower-plus-72b
+  # Tower-Plus-72B — GEMBA-MQM prompt (error-span / MQM-weighted).
+  - ref: tower/tower-plus-72b-mqm
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]
