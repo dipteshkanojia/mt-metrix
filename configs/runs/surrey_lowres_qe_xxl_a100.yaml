@@ -1,0 +1,46 @@
+# Surrey Low-resource-QE-DA — XXL-QE-only follow-up (a100 gpu:1).
+#
+# Why a separate config:
+#   CometKiwi-XXL and XCOMET-XXL-QE each load a ~40 GB fp32 state dict
+#   into CPU RAM before GPU transfer. On nice-project's L40s node the
+#   RealMemory ceiling is 128 GB, and chaining either XXL with Tower-13B
+#   (vLLM CPU copy on top) pushes peak RAM above that limit. The
+#   2026-04-24 cluster probe rejected a --mem=256G submission to
+#   nice-project on exactly those grounds.
+#
+#   Solution: run the two XXL-QE scorers on a100, where --mem=256G is
+#   honoured. 48 GB VRAM would technically fit XXL at inference time,
+#   but the CPU-RAM ceiling is the binding constraint.
+#
+# Dataset coverage: same multilingual subset as the light full-matrix
+# (~7.7k rows × 8 low-resource pairs). Output writes to its own
+# timestamped dir; `mt-metrix tabulate` merges both into one table.
+#
+# Recommended execution:
+#   scripts/submit.sh configs/runs/surrey_lowres_qe_xxl_a100.yaml \
+#       -p a100 --gres=gpu:1 --mem=256G --time=12:00:00
+#
+# Fairshare note: a100 gpu:1 is cheaper than gpu:4 but still ~2.2×
+# weight of a 3090. Submit this only after the main nice-project
+# full-matrix run is in flight — the two are designed to run in
+# parallel across partitions.
+#
+# Output convention: writes to outputs/surrey_lowres_qe_xxl_a100_<ts>/,
+# which mt-metrix tabulate merges into the lowres_qe row alongside
+# outputs/surrey_lowres_qe_full_matrix_<ts>/ and
+# outputs/surrey_lowres_qe_tower72b_<ts>/.
+
+run:
+  id: surrey_lowres_qe_xxl_a100
+
+dataset: !include ../datasets/surrey_lowres_qe.yaml
+
+scorers:
+  # CometKiwi-XXL — reference-free QE, ~10.7B params.
+  - ref: comet/wmt23-cometkiwi-da-xxl
+  # XCOMET-XXL-QE — reference-free XCOMET, ~10.7B params.
+  - ref: comet/xcomet-xxl-qe
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]

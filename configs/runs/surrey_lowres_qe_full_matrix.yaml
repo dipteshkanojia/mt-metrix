@@ -9,17 +9,22 @@
 #
 # Recommended execution on AISURREY (via the pre-flight wrapper):
 #   scripts/submit.sh configs/runs/surrey_lowres_qe_full_matrix.yaml \
-#     --mem=256G --time=24:00:00
+#     -p nice-project --gres=gpu:1 --mem=128G --time=24:00:00
 #
-# IMPORTANT — CPU RAM sizing (learned 2026-04-19):
-#   This matrix chains CometKiwi-XXL (~40 GB fp32 state dict loaded into
-#   CPU RAM before GPU transfer) AND Tower-13B / Tower-72B (vLLM CPU copy
-#   before sharding). The slurm default `--mem=128G` is enough for any
-#   SINGLE scorer including XXL, but not for the full matrix. Override
-#   `--mem=256G` at submit time. Without that override, expect:
-#     slurmstepd: Detected 1 oom_kill event  (no CUDA traceback)
-#   at the xxl checkpoint load — the kernel OOM killer enforcing the
-#   cgroup limit, NOT a GPU OOM.
+# IMPORTANT — CPU RAM sizing (learned 2026-04-19, refined 2026-04-24):
+#   This matrix used to also include CometKiwi-XXL and XCOMET-XXL-QE.
+#   Chaining those (each ~40 GB fp32 state dict into CPU RAM) with
+#   Tower-13B's vLLM CPU copy pushed peak RAM above 128 GB — fine on an
+#   A100 node, but nice-project's L40s node maxes at 128 GB RealMemory,
+#   so the 2026-04-24 cluster probe rejected the submission. The two
+#   XXL-QE scorers now live in `surrey_lowres_qe_xxl_a100.yaml` (a100
+#   gpu:1, --mem=256G). With XXL out, this matrix fits --mem=128G on
+#   nice-project cleanly.
+#
+#   Without XXL, peak CPU RAM is set by Tower-13B's vLLM CPU copy
+#   (~60 GB) and fits 128G with headroom. If you ever re-add XXL
+#   here, go back to --mem=256G and a partition that can honour it
+#   (a100 or rtx8000).
 #
 # Crash recovery: the runner persists segments.tsv + summary.json after
 # EVERY scorer, so a mid-loop OOM in Tower-72B (say) still leaves all
@@ -43,12 +48,13 @@ scorers:
   # --- COMET QE family (reference-free) ---------------------------------
   - ref: comet/wmt22-cometkiwi-da
   - ref: comet/wmt23-cometkiwi-da-xl
-  - ref: comet/wmt23-cometkiwi-da-xxl
   - ref: comet/xcomet-xl-qe
-  - ref: comet/xcomet-xxl-qe
   - ref: comet/wmt20-comet-qe-da
   # wmt21-comet-qe-da / wmt21-comet-qe-mqm omitted — Marian checkpoints,
   # unloadable with modern unbabel-comet (see configs/models/comet.yaml).
+  # XXL-QE variants (wmt23-cometkiwi-da-xxl, xcomet-xxl-qe) moved to
+  # `surrey_lowres_qe_xxl_a100.yaml` — their peak CPU RAM can't share a
+  # node with Tower-13B under the 128 GB nice-project cap.
 
   # --- COMET reference-based (will be skipped, no refs) -----------------
   - ref: comet/wmt22-comet-da
