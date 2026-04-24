@@ -128,7 +128,7 @@ python3 scripts/cluster_probe.py \
 
 `scripts/cluster_probe.py` pairs `scontrol show node -o` with
 `squeue --noheader` to produce a ranked list of partitions. Ranking
-combines four signals, in this order:
+combines five signals, in this order:
 
 1. Ready-now (capacity ≥ `--gres=gpu:N` right now).
 2. Tier — `nice-project` (1) > 48 GB open partitions (2) > 24 GB (3) >
@@ -136,7 +136,7 @@ combines four signals, in this order:
    job fits on 48 GB *and* a non-a100 READY partition is available,
    keeping headline hardware for headline runs.
 3. Wait — `deficit`-th-smallest `TimeLeft` across running jobs on that
-   partition (where `deficit = gpus_requested - gpus_free + pending_demand`).
+   partition (where `deficit = gpus_requested - gpus_free + pending_gpu_demand`).
 4. VRAM waste — smaller is better.
 5. Free GPU count — more is better (final tiebreaker).
 
@@ -149,7 +149,8 @@ faculty-specific partition shows up.
 If the recommender's top choice is not your `-p`, `submit.sh` prompts
 interactively (15 s, no default; pick 1/2/3 or `c` to cancel).
 `--stay-on-target` skips the prompt; `SUBMIT_AUTO_ROUTE=1`
-auto-accepts #1. See
+auto-accepts #1. The 15 s timeout is overridable via `SUBMIT_PROMPT_TIMEOUT=<seconds>`.
+See
 `docs/superpowers/specs/2026-04-23-queue-aware-cluster-probe-design.md`
 for the full design rationale.
 

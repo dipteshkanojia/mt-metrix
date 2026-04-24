@@ -90,6 +90,7 @@ Escape hatches:
 
 - `--stay-on-target` — keep your original partition even if the probe prefers another. Good for deliberate "I want a100 for headline timing" runs.
 - `SUBMIT_AUTO_ROUTE=1 scripts/submit.sh ...` — accept the #1 recommendation without prompting. Use in cron / unattended scripts.
+- `SUBMIT_PROMPT_TIMEOUT=<seconds>` — override the 15 s default prompt timeout. Useful in CI where you want a shorter wait, or interactively when you need longer to decide.
 
 ## 2. Actually submit
 
