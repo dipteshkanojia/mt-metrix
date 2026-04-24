@@ -68,7 +68,13 @@
 #     OS, so SLURM-schedulable mem caps at CfgTRES=125G. Any --mem
 #     >= 126G is rejected. Our default --mem=120G leaves a small buffer.
 #     GRES = 2× L40s; --gres=gpu:1 or gpu:2 both allowed, gpu:N>2 rejected.
-#     CPUs = 14 schedulable (16 physical, 2 reserved via CoreSpecCount).
+#     CPUs = 14 schedulable (16 physical, 2 reserved via CoreSpecCount),
+#     BUT split across 2 sockets = 7 per socket, AND
+#     Gres=gpu:nvidia_l40s:2(S:0) — both GPUs are on socket 0 only. A
+#     --gres=gpu:1 job therefore binds to socket 0 and is capped at 7
+#     CPUs. Asking --cpus-per-task > 7 raises 'Requested node config
+#     is not available' even though the total CfgTRES cpu=14 fits
+#     (learned 2026-04-24). Use --cpus-per-task=4 here; it's plenty.
 #
 #   rtx8000 / rtx_a6000_risk / l40s_risk / 3090:
 #     typically 125-256 GB schedulable depending on node; check with
@@ -113,7 +119,13 @@
 
 #SBATCH --partition=nice-project     # NICE-group dedicated 2× L40s 48 GB; override with -p on CLI
 #SBATCH --gres=gpu:1                 # override with --gres=gpu:N (N=4 only for Tower-72B on a100)
-#SBATCH --cpus-per-task=8            # dataloader workers; nice-project schedulable is 14 cores
+#SBATCH --cpus-per-task=4            # dataloader workers. MUST fit on the GPU's socket, NOT total node.
+                                     # nice-project: Gres=gpu:nvidia_l40s:2(S:0) — both GPUs pinned to
+                                     # socket 0, which has CfgTRES=cpu=14/2=7 CPUs schedulable. Asking
+                                     # for >7 raises 'Requested node configuration is not available'
+                                     # at sbatch --test-only (learned 2026-04-24). 4 is enough for
+                                     # COMET + vLLM dataloading; bump to 7 for Tower-72B (a100 has
+                                     # gpu:nvidia_a100:4(S:0-1), so 8+ is also fine there).
 #SBATCH --mem=120G                   # nice-project CfgTRES caps at 125G; 120G leaves OS buffer. a100 can take --mem=256G.
 #SBATCH --time=24:00:00              # 24h; most runs finish in <4h
 #SBATCH --output=logs/slurm_%j_%x.out
