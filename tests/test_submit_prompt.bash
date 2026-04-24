@@ -137,8 +137,24 @@ t_malformed_wait_s() {
     [[ "$chosen" == "nice-project" ]]
 }
 
+t_timeout_honours_explicit_p() {
+    # When submit.sh detects the user passed an explicit -p <target>, it
+    # now hands the target as a 3rd arg to _prompt_alternative. If the
+    # user walks away (timeout), the helper honours that explicit choice
+    # instead of cancelling — otherwise a drive-by recommender proposal
+    # eats the 15s window and trashes a run the user had already decided.
+    local alts; alts=$(_mkalts)
+    local chosen rc
+    set +e
+    chosen=$(_prompt_alternative "l40s_risk" "$alts" "l40s_risk" </dev/null 2>/dev/null)
+    rc=$?
+    set -e
+    [[ "$chosen" == "l40s_risk" ]] && [[ "$rc" -eq 0 ]]
+}
+
 for t in t_pick_alt_1 t_pick_alt_2 t_cancel_c t_timeout_cancel t_auto_route \
-         t_invalid_digit_out_of_range t_invalid_input t_empty_tsv t_malformed_wait_s; do
+         t_invalid_digit_out_of_range t_invalid_input t_empty_tsv t_malformed_wait_s \
+         t_timeout_honours_explicit_p; do
     if $t; then
         echo "  PASS  $t"
         ((pass++))

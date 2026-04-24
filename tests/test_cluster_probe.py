@@ -644,6 +644,223 @@ def test_check_fit_ready_a100_with_tp4(probe):
 
 
 # ---------------------------------------------------------------------------
+# "Busy right now" vs "can never fit" disambiguation.
+#
+# 2026-04-24 incident: the user submitted -p a100 --gres=gpu:1 when every
+# a100 node was fully allocated and 31 jobs were pending. The probe
+# reported the partition as NO-FIT with ``per-node GPU ceiling (0)`` and
+# submit.sh hard-rejected. That's wrong — queueing behind 31 jobs is
+# what SLURM queues are for. A partition is only structurally unfit when
+# its per-node GPU ceiling is NON-ZERO and BELOW the requested gres.
+# ---------------------------------------------------------------------------
+
+# Full-node-allocated scenario: a100 partition with 1 node × 8 GPUs, all
+# ALLOCATED (state is still is_usable per SLURM semantics), plus 31
+# pending jobs requesting 1 GPU each. With the existing Gres parser this
+# already flows through as shape_ok=True — the test locks that in so a
+# regression in aggregate_partitions/check_fit can't silently reintroduce
+# the bug.
+FULL_A100_SCONTROL = (
+    "NodeName=aisurrey01 Arch=x86_64 CPUTot=32 "
+    "RealMemory=512000 "
+    "State=ALLOCATED "
+    "Gres=gpu:nvidia_a100:8(IDX:0-7) "
+    "Partitions=a100 "
+    "AllocTRES=cpu=16,mem=256G,gres/gpu=8,gres/gpu:nvidia_a100=8 "
+    "CfgTRES=cpu=32,mem=500G,gres/gpu=8,gres/gpu:nvidia_a100=8"
+)
+
+
+def _queue_for_busy_a100(probe, pending_count: int = 31) -> list:
+    """Build a squeue payload for a busy a100 partition.
+
+    One long-running job holds the 8 GPUs (time_left_s=2h55m), and
+    ``pending_count`` pending jobs each request 1 GPU. These are used to
+    verify that check_fit treats 'busy-with-queue' as shape_ok, and to
+    give pick_recommended a populated pending_gpu_demand.
+    """
+    running_line = (
+        "JOB_RUN|a100|RUNNING|2:55:00|5:00:00|None|gpu:nvidia_a100:8|1|user1"
+    )
+    pending_lines = [
+        f"JOB_PEND{i}|a100|PENDING|N/A|N/A|Resources|gpu:nvidia_a100:1|1|user{i}"
+        for i in range(pending_count)
+    ]
+    return [
+        j for line in [running_line] + pending_lines
+        if (j := probe.parse_squeue_line(line)) is not None
+    ]
+
+
+def _build_partition_with_queue(probe, scontrol_text: str, jobs):
+    nodes = [
+        n for line in scontrol_text.splitlines()
+        if (n := probe.parse_scontrol_node_line(line)) is not None
+    ]
+    parts = probe.aggregate_partitions(nodes)
+    probe.attach_queue_stats(parts, jobs)
+    return parts
+
+
+def test_check_fit_busy_a100_shape_ok_not_no_fit(probe):
+    """a100 fully allocated + 31 pending → CONTESTED, never NO-FIT.
+
+    Lock-in for the 2026-04-24 incident: 'queue is deep, GPUs busy' must
+    stay shape_ok so submit.sh falls into the warn-and-proceed path.
+    """
+    parts = _build_partition_with_queue(
+        probe, FULL_A100_SCONTROL, _queue_for_busy_a100(probe),
+    )
+    p = parts["a100"]
+    # Sanity: physical capacity is 8, currently all allocated, 31 pending.
+    assert p.max_gpu_per_node == 8
+    assert p.gpus_total == 8
+    assert p.gpus_free == 0
+    assert len(p.pending_jobs) == 31
+    req = probe.Request(
+        partition="a100", gpus=1, mem_mb=0, cpus=0, vram_need_gb=80,
+    )
+    fit = probe.check_fit(p, req)
+    assert fit.shape_ok is True, (
+        f"a100 with 8 GPUs per node must accept --gres=gpu:1 — "
+        f"got reasons={fit.reasons}"
+    )
+    assert fit.has_capacity_now is False
+    assert fit.status_word() == "contested"
+
+
+# Parse-failure scenario: scontrol produces a line whose Gres string the
+# probe cannot parse (e.g. an unfamiliar naming convention for the GPU
+# type). gpu_total ends up 0 across every a100 node. In the live cluster
+# this manifests as '0/0 GPUs, per-node ceiling (0)' on a partition that
+# clearly DOES have GPUs — as evidenced by 31 queued GPU jobs. The fix:
+# when max_gpu_per_node is 0 but the queue has running or pending GPU
+# jobs in this partition, we can be certain the partition supports GPUs
+# and must not reject the shape.
+UNPARSEABLE_A100_SCONTROL = (
+    "NodeName=aisurrey01 Arch=x86_64 CPUTot=32 "
+    "RealMemory=512000 "
+    "State=ALLOCATED "
+    "Gres=gpu:a100-sxm4-80gb-mig:8(IDX:0-7) "
+    "Partitions=a100 "
+    "AllocTRES= "
+    "CfgTRES=cpu=32,mem=500G"
+)
+
+
+def test_check_fit_busy_a100_with_unparseable_gres_is_not_no_fit(probe):
+    """max_gpu_per_node=0 but squeue shows GPU jobs → shape_ok, not NO-FIT.
+
+    Covers the specific production failure mode where Gres parsing
+    returns 0 yet the partition obviously accepts GPU jobs. The
+    disambiguation signal is the queue: running or pending GPU jobs on
+    this partition are ground truth that it supports GPUs.
+    """
+    parts = _build_partition_with_queue(
+        probe, UNPARSEABLE_A100_SCONTROL, _queue_for_busy_a100(probe),
+    )
+    p = parts["a100"]
+    # Confirm the fixture really does trip the parse path we care about.
+    assert p.max_gpu_per_node == 0
+    assert p.gpus_total == 0
+    # Queue evidence survives parsing: 1 running + 31 pending, all GPU jobs.
+    assert len(p.running_jobs) == 1
+    assert p.running_jobs[0].num_gpus == 8
+    assert p.pending_gpu_demand >= 31
+    req = probe.Request(
+        partition="a100", gpus=1, mem_mb=0, cpus=0, vram_need_gb=0,
+    )
+    fit = probe.check_fit(p, req)
+    assert fit.shape_ok is True, (
+        f"partition with 0 parsed GPUs but 31 pending GPU jobs must NOT "
+        f"be reported NO-FIT — got reasons={fit.reasons}"
+    )
+    assert fit.has_capacity_now is False
+    assert "exceeds per-node GPU ceiling (0)" not in "; ".join(fit.reasons)
+
+
+# Regression guard: a genuine structural mismatch must still say NO-FIT.
+# Requesting --gres=gpu:8 on a partition whose biggest node has 4 GPUs
+# cannot be satisfied by any amount of queueing; the probe must stop it.
+SMALL_NODE_SCONTROL = (
+    "NodeName=aisurrey02 Arch=x86_64 CPUTot=16 "
+    "RealMemory=128000 "
+    "State=IDLE "
+    "Gres=gpu:nvidia_a100:4(IDX:0-3) "
+    "Partitions=a100_small "
+    "AllocTRES= "
+    "CfgTRES=cpu=16,mem=125G,gres/gpu=4,gres/gpu:nvidia_a100=4"
+)
+
+
+def test_check_fit_genuine_no_fit_when_gpus_exceed_ceiling(probe):
+    """Regression: requesting 8 GPUs on a 4-GPU-per-node partition must
+    stay NO-FIT with a non-zero ceiling in the reason string."""
+    parts = _build_partition_with_queue(probe, SMALL_NODE_SCONTROL, [])
+    p = parts["a100_small"]
+    assert p.max_gpu_per_node == 4
+    req = probe.Request(
+        partition="a100_small", gpus=8, mem_mb=0, cpus=0, vram_need_gb=0,
+    )
+    fit = probe.check_fit(p, req)
+    assert fit.shape_ok is False
+    assert any(
+        "exceeds per-node GPU ceiling (4)" in r for r in fit.reasons
+    ), fit.reasons
+
+
+def test_check_fit_no_gpus_and_no_queue_evidence_is_no_fit(probe):
+    """When max_gpu_per_node=0 AND no GPU jobs in the queue, the
+    partition might genuinely be CPU-only or mis-configured — we have no
+    evidence it accepts GPU jobs, so NO-FIT is the correct answer."""
+    parts = _build_partition_with_queue(probe, UNPARSEABLE_A100_SCONTROL, [])
+    p = parts["a100"]
+    assert p.max_gpu_per_node == 0
+    assert not p.running_jobs
+    assert not p.pending_jobs
+    req = probe.Request(
+        partition="a100", gpus=1, mem_mb=0, cpus=0, vram_need_gb=0,
+    )
+    fit = probe.check_fit(p, req)
+    assert fit.shape_ok is False
+    assert any(
+        "0 GPUs per node" in r or "per-node GPU ceiling" in r
+        for r in fit.reasons
+    ), fit.reasons
+
+
+def test_main_busy_a100_exits_contested_not_nothing_fits(probe, monkeypatch, tmp_path, capsys):
+    """End-to-end: probe.main returns 2 (CONTESTED), not 4 (nothing
+    fits), when the target partition is full but has a populated queue.
+    This is the exit code submit.sh keys off to pick warn-and-prompt
+    rather than hard-fail."""
+    monkeypatch.setattr(
+        probe, "run_scontrol_show_node", lambda: FULL_A100_SCONTROL,
+    )
+    jobs_tsv = "\n".join(
+        [
+            "JOB_RUN|a100|RUNNING|2:55:00|5:00:00|None|gpu:nvidia_a100:8|1|user1",
+        ] + [
+            f"JOB_PEND{i}|a100|PENDING|N/A|N/A|Resources|gpu:nvidia_a100:1|1|user{i}"
+            for i in range(31)
+        ]
+    )
+    monkeypatch.setattr(probe, "run_squeue", lambda: jobs_tsv)
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("scorers:\n  - ref: tower-13b\n")   # triggers 48 GB VRAM hint
+    rc = probe.main([
+        "--config", str(cfg),
+        "--partition", "a100", "--gpus", "1",
+        "--slurm-script", "/dev/null",
+        "--no-colour",
+    ])
+    assert rc == 2, f"expected CONTESTED (exit 2), got {rc}"
+    out = capsys.readouterr().out
+    assert "NO-FIT" not in out or "CONTESTED" in out
+    assert "CONTESTED" in out
+
+
+# ---------------------------------------------------------------------------
 # Recommendation
 # ---------------------------------------------------------------------------
 

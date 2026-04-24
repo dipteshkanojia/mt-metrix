@@ -45,12 +45,15 @@ set -euo pipefail
 # Queue-aware alternative-picking prompt. See
 # docs/superpowers/specs/2026-04-23-queue-aware-cluster-probe-design.md.
 #
-# _prompt_alternative(target_partition, alts_tsv_path)
+# _prompt_alternative(target_partition, alts_tsv_path, [timeout_default])
 #   stdin:  user input ("1"/"2"/"3" or "c"); no keypress within
-#           ${SUBMIT_PROMPT_TIMEOUT:-15}s = cancel
+#           ${SUBMIT_PROMPT_TIMEOUT:-15}s = cancel, UNLESS
+#           timeout_default is non-empty (set by the caller when the user
+#           passed an explicit -p flag), in which case we return that
+#           partition on timeout instead of cancelling.
 #   stdout: chosen partition name on success
 #   exit:   0 = chosen partition printed on stdout
-#           7 = user cancelled (or timed out)
+#           7 = user cancelled (or timed out with no timeout_default)
 #
 # Test hook: SUBMIT_TEST_SKIP_PREFLIGHT=1 makes submit.sh return after
 # defining helpers, so `bash tests/test_submit_prompt.bash` can source
@@ -59,6 +62,7 @@ set -euo pipefail
 _prompt_alternative() {
     local target="$1"
     local alts_tsv="$2"
+    local timeout_default="${3:-}"
     local timeout="${SUBMIT_PROMPT_TIMEOUT:-15}"
 
     # Read TSV. Skip header; build an array of partitions with per-line
@@ -98,18 +102,29 @@ _prompt_alternative() {
         return 0
     fi
 
+    local prompt_tail
+    if [[ -n "$timeout_default" ]]; then
+        prompt_tail="${timeout}s, timeout keeps your explicit -p=${timeout_default}"
+    else
+        prompt_tail="${timeout}s, no default"
+    fi
     {
         echo "Your target: $target"
         echo "Recommender's ranking:"
         for label in "${labels[@]}"; do
             echo "$label"
         done
-        echo -n "Pick 1-${#parts[@]} or c to cancel (${timeout}s, no default): "
+        echo -n "Pick 1-${#parts[@]} or c to cancel (${prompt_tail}): "
     } >&2
 
     local choice=""
     if ! read -r -t "$timeout" choice; then
         echo >&2
+        if [[ -n "$timeout_default" ]]; then
+            echo "timed out; honouring explicit -p=${timeout_default}." >&2
+            echo "$timeout_default"
+            return 0
+        fi
         echo "timed out; cancelling submission." >&2
         return 7
     fi
@@ -129,6 +144,118 @@ _prompt_alternative() {
             return 7
             ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# FreeMem check. CfgTRES tells you what the scheduler is allowed to hand
+# out; FreeMem tells you what the OS actually has free right now. SLURM's
+# select/cons_tres plugin rejects allocations whose --mem exceeds FreeMem
+# regardless of AllocMem. On 2026-04-24 a non-SLURM process was holding
+# ~110GB of RAM on aisurrey35; CfgTRES still advertised mem=125G (so the
+# CfgTRES-only probe said "fits"), FreeMem was 16456MB, and --mem=120G
+# hard-rejected. The CfgTRES check alone classified that as transient
+# contention. This helper closes the gap.
+#
+# _check_freemem(partition, requested_mem_mb)
+#   Reads `scontrol show node -o` (or $SUBMIT_TEST_SCONTROL_OUTPUT if
+#   set — test hook), filters to schedulable nodes in the target
+#   partition, and checks whether ANY usable node has FreeMem >=
+#   requested_mem_mb.
+#   stdout: one-line diagnostic, e.g.
+#     "ok FreeMem=65536MB on aisurrey35 (request 32000MB)"
+#     "hard-fail all usable nodes in nice-project have FreeMem below
+#      120000MB (max=16456MB on aisurrey35)"
+#     "unknown scontrol unavailable or no usable nodes"
+#   exit:  0 = fits, 1 = hard-fail, 2 = unknown (fall through to
+#          existing transient-contention handling)
+
+_check_freemem() {
+    local partition="$1"
+    local req_mb="$2"
+    local raw=""
+    if [[ -n "${SUBMIT_TEST_SCONTROL_OUTPUT:-}" ]]; then
+        if [[ -f "$SUBMIT_TEST_SCONTROL_OUTPUT" ]]; then
+            raw=$(<"$SUBMIT_TEST_SCONTROL_OUTPUT")
+        else
+            raw="$SUBMIT_TEST_SCONTROL_OUTPUT"
+        fi
+    elif command -v scontrol >/dev/null 2>&1; then
+        raw=$(scontrol show node -o 2>/dev/null || true)
+    fi
+    # Trim leading/trailing whitespace — a pure-whitespace payload should
+    # behave like an empty one (unknown), not like a node line.
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    raw="${raw%"${raw##*[![:space:]]}"}"
+    if [[ -z "$raw" ]]; then
+        echo "unknown scontrol unavailable"
+        return 2
+    fi
+
+    local max_free=-1
+    local max_free_node=""
+    local seen_any_usable=0
+    while IFS= read -r line; do
+        [[ "$line" != *NodeName=* ]] && continue
+
+        # Partitions field may be comma-separated (e.g. 3090,3090_risk).
+        # Filter to nodes that actually belong to the target partition.
+        local parts_field=""
+        if [[ "$line" =~ Partitions=([^[:space:]]+) ]]; then
+            parts_field="${BASH_REMATCH[1]}"
+        fi
+        case ",$parts_field," in
+            *",$partition,"*) ;;
+            *) continue ;;
+        esac
+
+        # State can be "IDLE", "MIXED", "ALLOCATED+DRAIN", "IDLE*"; drop
+        # the trailing '*' (nodes mismatched with scheduler) and split on
+        # '+' so any unusable sub-state knocks the node out.
+        local state_field=""
+        if [[ "$line" =~ State=([^[:space:]]+) ]]; then
+            state_field="${BASH_REMATCH[1]}"
+        fi
+        state_field="${state_field%\*}"
+        local primary_state="${state_field%%+*}"
+        case "$primary_state" in
+            IDLE|MIXED|ALLOCATED|COMPLETING) ;;
+            *) continue ;;
+        esac
+        case "+$state_field+" in
+            *+DRAIN+*|*+DRAINED+*|*+DRAINING+*|*+DOWN+*|*+FAIL+*|*+FAILING+*|*+MAINT+*|*+NO_RESPOND+*|*+POWER_DOWN+*|*+POWERED_DOWN+*|*+POWERING_DOWN+*|*+POWERING_UP+*|*+REBOOT+*|*+RESERVED+*|*+PLANNED+*)
+                continue
+                ;;
+        esac
+
+        local free_mb=""
+        if [[ "$line" =~ FreeMem=([0-9]+) ]]; then
+            free_mb="${BASH_REMATCH[1]}"
+        fi
+        [[ -z "$free_mb" ]] && continue
+
+        local node_name=""
+        if [[ "$line" =~ NodeName=([^[:space:]]+) ]]; then
+            node_name="${BASH_REMATCH[1]}"
+        fi
+
+        seen_any_usable=1
+        if (( free_mb > max_free )); then
+            max_free="$free_mb"
+            max_free_node="$node_name"
+        fi
+    done <<< "$raw"
+
+    if [[ "$seen_any_usable" -eq 0 ]]; then
+        echo "unknown no usable nodes with FreeMem in partition $partition"
+        return 2
+    fi
+
+    if (( max_free >= req_mb )); then
+        echo "ok FreeMem=${max_free}MB on ${max_free_node} (request ${req_mb}MB)"
+        return 0
+    fi
+    echo "hard-fail all usable nodes in $partition have FreeMem below ${req_mb}MB (max=${max_free}MB on ${max_free_node})"
+    return 1
 }
 
 # Early exit for the test harness. Defines the helper above and returns
@@ -217,10 +344,15 @@ ok "config: $CONFIG"
 
 echo "[2/6] partition sanity check (no 'gpu' partition on AISURREY)..."
 PARTITION=""
+# USER_EXPLICIT_P: 1 when the caller passed -p / --partition= on the CLI.
+# The recommender can pick a different partition than the user requested;
+# if the user deliberately picked one, the timeout default in
+# _prompt_alternative keeps their choice rather than cancelling.
+USER_EXPLICIT_P=0
 for ((i=0; i<${#EXTRA_ARGS[@]}; i++)); do
     case "${EXTRA_ARGS[$i]}" in
-        -p)            PARTITION="${EXTRA_ARGS[$((i+1))]:-}" ;;
-        --partition=*) PARTITION="${EXTRA_ARGS[$i]#--partition=}" ;;
+        -p)            PARTITION="${EXTRA_ARGS[$((i+1))]:-}"; USER_EXPLICIT_P=1 ;;
+        --partition=*) PARTITION="${EXTRA_ARGS[$i]#--partition=}"; USER_EXPLICIT_P=1 ;;
     esac
 done
 if [[ -z "$PARTITION" ]]; then
@@ -346,7 +478,9 @@ if [[ -f "$CLUSTER_PROBE" ]] && command -v python3 >/dev/null 2>&1; then
                 if [[ -n "$TOP_ALT" ]] && [[ "$TOP_ALT" != "$PARTITION" ]]; then
                     yel "  recommender prefers '$TOP_ALT' over '$PARTITION'."
                     set +e
-                    ROUTE_TO=$(_prompt_alternative "$PARTITION" "$ALTS_TSV")
+                    _PROMPT_DEFAULT=""
+                    [[ "$USER_EXPLICIT_P" == "1" ]] && _PROMPT_DEFAULT="$PARTITION"
+                    ROUTE_TO=$(_prompt_alternative "$PARTITION" "$ALTS_TSV" "$_PROMPT_DEFAULT")
                     PROMPT_RC=$?
                     set -e
                     if [[ "$PROMPT_RC" -eq 7 ]]; then
@@ -378,7 +512,9 @@ if [[ -f "$CLUSTER_PROBE" ]] && command -v python3 >/dev/null 2>&1; then
                 yel "  --stay-on-target: skipping alternative prompt; staying on $PARTITION."
             elif [[ -f "$ALTS_TSV" ]]; then
                 set +e
-                ROUTE_TO=$(_prompt_alternative "$PARTITION" "$ALTS_TSV")
+                _PROMPT_DEFAULT=""
+                [[ "$USER_EXPLICIT_P" == "1" ]] && _PROMPT_DEFAULT="$PARTITION"
+                ROUTE_TO=$(_prompt_alternative "$PARTITION" "$ALTS_TSV" "$_PROMPT_DEFAULT")
                 PROMPT_RC=$?
                 set -e
                 if [[ "$PROMPT_RC" -eq 7 ]]; then
@@ -407,7 +543,19 @@ if [[ -f "$CLUSTER_PROBE" ]] && command -v python3 >/dev/null 2>&1; then
             yel "  warn: cluster probe couldn't query scontrol; proceeding to --test-only."
             ;;
         4)
+            # Exit 4 = no partition structurally accepts this shape
+            # (e.g. --gres=gpu:8 on a cluster whose biggest node has 4).
+            # After the 2026-04-24 fix, check_fit also trusts live queue
+            # evidence, so a fully-allocated partition with pending GPU
+            # jobs no longer lands here — it lands in exit 2 (CONTESTED)
+            # where submit.sh warns and queues. If you're still seeing
+            # exit 4, the job's per-node shape exceeds the cluster's
+            # physical ceiling; there is nothing to wait for.
             red "  cluster probe: no partition can fit this job shape at --gres=gpu:$GPU_COUNT."
+            red "  (if the probe table shows every partition as NO-FIT with"
+            red "   per-node GPU ceiling (0), scontrol may be missing Gres"
+            red "   info; rerun the probe on a submit node or check"
+            red "   scripts/cluster_probe.py's GPU_VRAM_GB map for a new card.)"
             fail "nothing fits; re-shape the job (scorers, gpus, mem)"
             ;;
         5)
@@ -514,18 +662,57 @@ if command -v sbatch >/dev/null 2>&1; then
             done
             red "  raw error: $TESTONLY_OUT"
             fail "request exceeds the partition's per-node ceilings; fix and retry"
-        else
-            yel "  warn: sbatch --test-only couldn't place this job RIGHT NOW:"
-            yel "        $TESTONLY_OUT"
-            yel "        Shape fits the partition's per-node ceilings (mem=${REQ_MEM_MB}M ≤ ${_BIG_MEM_MB}M,"
-            yel "        cpu=${REQ_CPUS} ≤ ${_BIG_CPU}, gpu=${REQ_GPUS} ≤ ${_BIG_GPU}), so this is"
-            yel "        transient — all GPUs in '$PARTITION' are probably allocated right now."
-            yel "        Check: sinfo -p $PARTITION -o '%n %C %m %G %t'"
-            yel "        The real sbatch will queue the job in PD and start when a slot frees."
-            yel "        Ctrl-C within 5s to abort, or Enter to submit anyway..."
-            read -r -t 5 || true
-            ok "proceeding past transient resource-contention warning"
         fi
+
+        # CfgTRES says fits — but sbatch may still be rejecting because
+        # FreeMem (OS-visible free RAM) on every usable node is below
+        # --mem. This happens when a non-SLURM process holds RAM: CfgTRES
+        # still advertises the full capacity, AllocMem says 0, but the
+        # select/cons_tres plugin refuses the allocation. Seen live on
+        # 2026-04-24 (aisurrey35 FreeMem=16456MB, --mem=120G, hard
+        # rejected). Without this check, submit.sh would invite an Enter
+        # keypress and the real sbatch would reject a second time.
+        FREEMEM_OUT=""
+        FREEMEM_RC=2
+        if [[ -n "$REQ_MEM_MB" ]]; then
+            set +e
+            FREEMEM_OUT=$(_check_freemem "$PARTITION" "$REQ_MEM_MB")
+            FREEMEM_RC=$?
+            set -e
+        fi
+        if [[ "$FREEMEM_RC" -eq 1 ]]; then
+            red "  sbatch --test-only rejected the submission — non-SLURM process is holding RAM:"
+            red "    $FREEMEM_OUT"
+            red "  SLURM's select/cons_tres plugin compares --mem to FreeMem (OS-visible free"
+            red "  RAM), not AllocMem, so this is a HARD rejection, not transient contention."
+            red "  raw error: $TESTONLY_OUT"
+            if [[ -f "${ALTS_TSV:-}" ]]; then
+                TOP_ALT=$(awk -F'\t' -v p="$PARTITION" \
+                          'NR>1 && $1==1 && $2!=p {print $2; exit}' "$ALTS_TSV")
+                if [[ -z "$TOP_ALT" ]]; then
+                    TOP_ALT=$(awk -F'\t' -v p="$PARTITION" \
+                              'NR>1 && $2!=p {print $2; exit}' "$ALTS_TSV")
+                fi
+                if [[ -n "$TOP_ALT" ]]; then
+                    red "  Recommended: re-run with -p $TOP_ALT"
+                fi
+            fi
+            fail "partition '$PARTITION' is effectively unavailable; retry on a different -p"
+        fi
+
+        yel "  warn: sbatch --test-only couldn't place this job RIGHT NOW:"
+        yel "        $TESTONLY_OUT"
+        yel "        Shape fits the partition's per-node ceilings (mem=${REQ_MEM_MB}M ≤ ${_BIG_MEM_MB}M,"
+        yel "        cpu=${REQ_CPUS} ≤ ${_BIG_CPU}, gpu=${REQ_GPUS} ≤ ${_BIG_GPU}), so this is"
+        yel "        transient — all GPUs in '$PARTITION' are probably allocated right now."
+        if [[ "$FREEMEM_RC" -eq 0 ]]; then
+            yel "        FreeMem check: ${FREEMEM_OUT}"
+        fi
+        yel "        Check: sinfo -p $PARTITION -o '%n %C %m %G %t'"
+        yel "        The real sbatch will queue the job in PD and start when a slot frees."
+        yel "        Ctrl-C within 5s to abort, or Enter to submit anyway..."
+        read -r -t 5 || true
+        ok "proceeding past transient resource-contention warning"
     else
         red "  sbatch --test-only rejected the submission with a non-transient error:"
         red "    $TESTONLY_OUT"

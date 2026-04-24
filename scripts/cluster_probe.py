@@ -874,10 +874,30 @@ def check_fit(part: Partition, req: Request) -> FitStatus:
     # For GPUs, use max_gpu_per_node (populated during aggregation) —
     # SLURM enforces --gres=gpu:N per-node, not fleet-wide, so the
     # biggest single node is the true ceiling.
+    #
+    # ``max_gpu_per_node == 0`` is ambiguous: the partition may be
+    # genuinely CPU-only, OR the probe may have failed to parse Gres on
+    # every node (unfamiliar GPU-type naming, unusual scontrol output,
+    # or every node in an unusable state that zeros out the aggregation).
+    # The tiebreaker is the live queue: running or pending GPU jobs in
+    # this partition are ground truth that it supports --gres=gpu:N.
+    # Without that evidence we fall back to NO-FIT (the existing, safe
+    # default — 2026-04-24 incident: submit.sh wrongly rejected a100
+    # when every node was fully allocated and 31 GPU jobs were queued).
+    queue_gpu_evidence = max(
+        (j.num_gpus for j in part.running_jobs + part.pending_jobs),
+        default=0,
+    )
     if part.nodes_total == 0:
         shape_ok = False
         reasons.append("partition has no nodes")
-    elif req.gpus > part.max_gpu_per_node:
+    elif part.max_gpu_per_node == 0 and queue_gpu_evidence == 0:
+        shape_ok = False
+        reasons.append(
+            "partition reports 0 GPUs per node and no queued GPU jobs"
+        )
+    elif req.gpus > part.max_gpu_per_node \
+            and req.gpus > queue_gpu_evidence:
         shape_ok = False
         reasons.append(
             f"--gres=gpu:{req.gpus} exceeds per-node GPU ceiling "
