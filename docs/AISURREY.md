@@ -124,6 +124,35 @@ python3 scripts/cluster_probe.py \
     --partition a100 --gpus 4 --json
 ```
 
+### Queue-aware routing (check 5)
+
+`scripts/cluster_probe.py` pairs `scontrol show node -o` with
+`squeue --noheader` to produce a ranked list of partitions. Ranking
+combines four signals, in this order:
+
+1. Ready-now (capacity ≥ `--gres=gpu:N` right now).
+2. Tier — `nice-project` (1) > 48 GB open partitions (2) > 24 GB (3) >
+   `debug`/`2080ti` (4) > `a100` (5). A100 gets a +4 penalty when the
+   job fits on 48 GB *and* a non-a100 READY partition is available,
+   keeping headline hardware for headline runs.
+3. Wait — `deficit`-th-smallest `TimeLeft` across running jobs on that
+   partition (where `deficit = gpus_requested - gpus_free + pending_demand`).
+4. VRAM waste — smaller is better.
+5. Free GPU count — more is better (final tiebreaker).
+
+`cogvis-project` is in `PARTITIONS_BLOCKLIST` (module constant at the
+top of `cluster_probe.py`); the recommender never suggests it even
+though it has idle A6000s. The partition is still shown in the survey
+table, tagged `[not ours]`. Extend the blocklist when another
+faculty-specific partition shows up.
+
+If the recommender's top choice is not your `-p`, `submit.sh` prompts
+interactively (15 s, no default; pick 1/2/3 or `c` to cancel).
+`--stay-on-target` skips the prompt; `SUBMIT_AUTO_ROUTE=1`
+auto-accepts #1. See
+`docs/superpowers/specs/2026-04-23-queue-aware-cluster-probe-design.md`
+for the full design rationale.
+
 ## Right-sizing: pick the smallest GPU that fits
 
 `nice-project` is the default because it's our group's dedicated

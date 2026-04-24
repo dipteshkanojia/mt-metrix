@@ -47,13 +47,49 @@ scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml --dry-run
 
 The wrapper prints its checks as it goes:
 ```
-[1/5] config file check...     ok: configs/runs/surrey_legal_full_matrix.yaml
-[2/5] partition sanity check...ok: partition 'a100' exists
-[3/5] conda env check...       ok: conda env 'mt-metrix' present
-[4/5] duplicate job check...   ok: no duplicates of 'surrey_legal_full_matrix' in queue
-[5/5] sbatch --test-only...    ok: dry-run accepted
+[1/6] config file check...     ok: configs/runs/surrey_legal_full_matrix.yaml
+[2/6] partition sanity check...ok: partition 'nice-project' exists
+[3/6] conda env check...       ok: conda env present at .../conda_env
+[4/6] duplicate job check...   ok: no duplicates of 'surrey_legal_full_matrix' in queue
+[5/6] cluster probe (live capacity + VRAM fit)...
+
+  AISURREY partition survey (target: nice-project × 1 GPU, need ≥48 GB VRAM)
+    partition           status         gpus (free/total)   type                    vram    next free   pending
+    ------------------------------------------------------------------------------------------------------
+   *nice-project        READY          2/2                 nvidia_l40s             48G     now         0
+    rtx_a6000_risk      READY          4/8                 nvidia_rtx_a6000        48G     now         2
+    a100                READY          0/4                 nvidia_a100             80G     2h14m       3
+    cogvis-project      [not ours]     2/2                 nvidia_rtx_a6000+       48G     now         0
+
+  inferred VRAM need: 48 GB (from 3/4 scorers runnable at --gres=gpu:1; peak = 48 GB because scorers run sequentially)
+  skipped at tp>--gres=gpu:1: tower/tower-plus-72b — runner will skip these at load time; re-submit with more GPUs if you need them.
+
+  → nice-project: READY — proceed with pre-flight.
+[6/6] sbatch --test-only...    ok: dry-run accepted
 dry-run mode: pre-flight OK, not submitting.
 ```
+
+If the recommender prefers a different partition, you get an interactive prompt:
+
+```
+[5/6] cluster probe (live capacity + VRAM fit)...
+  ...survey table...
+  → a100: CONTESTED — shape fits but 0 free GPUs right now.
+  recommender prefers 'nice-project' over 'a100'.
+Your target: a100
+Recommender's ranking:
+  1) nice-project (wait: now; tier=1; free now, group partition)
+  2) rtx_a6000_risk (wait: now; tier=2; free now)
+  3) a100 (wait: 2h14m; tier=5; no immediate capacity; est. wait 134 min)
+Pick 1-3 or c to cancel (15s, no default):
+```
+
+Pick `1` / `2` / `3` to re-route, or `c` to cancel. No keypress within 15 s also cancels — there's no silent default.
+
+Escape hatches:
+
+- `--stay-on-target` — keep your original partition even if the probe prefers another. Good for deliberate "I want a100 for headline timing" runs.
+- `SUBMIT_AUTO_ROUTE=1 scripts/submit.sh ...` — accept the #1 recommendation without prompting. Use in cron / unattended scripts.
 
 ## 2. Actually submit
 
