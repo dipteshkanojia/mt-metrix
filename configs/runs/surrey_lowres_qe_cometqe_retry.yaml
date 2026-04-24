@@ -1,0 +1,85 @@
+# Surrey Low-resource-QE-DA — retry of the four COMET-QE scorers that
+# failed with `OSError: [Errno 22] Invalid argument` in the original
+# surrey_lowres_qe_full_matrix run on 2026-04-24.
+#
+# Failing four (all on the multilingual subset, n=7,699):
+#   - wmt22-cometkiwi-da   (catalogue default batch_size=64, num_workers=2)
+#   - wmt23-cometkiwi-da-xl (catalogue default batch_size=16, num_workers=2)
+#   - xcomet-xl-qe          (catalogue default batch_size=16 + spans on)
+#   - wmt20-comet-qe-da     (catalogue default batch_size=64)
+#
+# The two XXL variants in the same run (cometkiwi-da-xxl, xcomet-xxl-qe)
+# landed cleanly because the VRAM-aware downshift in
+# `_resolve_xxl_batch_size` forces batch_size=4 on 48 GB L40s — which
+# inadvertently sidesteps whatever the smaller-batch pressure point is
+# for these four. The four datasets that share the same scorers
+# (legal/general/health/tourism, 770–2,358 rows each) all completed
+# without Errno 22, so the failure is specific to lowres_qe's
+# combination of (a) ~7,700 rows, (b) Devanagari / Tamil / Telugu /
+# Sinhala / Gujarati Indic scripts, which XLM-R tokenises very densely.
+#
+# Belt-and-braces conservative settings applied here:
+#
+#   * batch_size: 8  (eighth of the kiwi-da default, half of the kiwi-xl
+#                     default — matches the XXL pair's effective batch on
+#                     48 GB cards, which we know lands).
+#   * num_workers: 0 (disable PyTorch DataLoader subprocesses. The most
+#                     common Errno 22 in PyTorch on Linux is the
+#                     shared-memory / pipe pressure when num_workers > 0
+#                     serialises large tensors across process boundaries.
+#                     num_workers=0 keeps everything single-process and
+#                     eliminates the fork. We pay a modest throughput
+#                     cost for ~7,700 rows — minutes, not hours.)
+#   * xcomet-xl-qe also drops `output_seg_err_spans` — the per-segment
+#     span tensors are an extra source of cross-process pressure and
+#     we don't need them for correlation analysis on lowres_qe.
+#
+# This is a CONFIG-ONLY hypothesis test. No scorer-code changes ship
+# with this config. If the retry lands clean: roll batch_size=8 +
+# num_workers=0 into the lowres_qe full-matrix config (or as
+# per-dataset overrides in the catalogue) so the next full run ships
+# clean. If it does NOT land clean: the run.log here will carry the
+# same Errno 22 stack trace with the heavier default batch removed
+# from the variable list, which lets us isolate the next layer
+# (sentence length, `multiprocessing.set_sharing_strategy`, unicode
+# normalisation) on evidence rather than guessing.
+#
+# Recommended execution:
+#   scripts/submit.sh configs/runs/surrey_lowres_qe_cometqe_retry.yaml \
+#       -p nice-project --gres=gpu:1 --mem=120G --time=8:00:00
+#
+# nice-project's 48 GB L40s is plenty — the four scorers are
+# 0.5B–3.5B params, all fit comfortably below 24 GB at batch_size=8.
+# Don't burn an a100 slot on this — keep that queue free for the
+# tower-72b job (2114943).
+
+run:
+  id: surrey_lowres_qe_cometqe_retry
+
+dataset: !include ../datasets/surrey_lowres_qe.yaml
+
+scorers:
+  - ref: comet/wmt22-cometkiwi-da
+    overrides:
+      batch_size: 8
+      num_workers: 0
+  - ref: comet/wmt23-cometkiwi-da-xl
+    overrides:
+      batch_size: 8
+      num_workers: 0
+  - ref: comet/xcomet-xl-qe
+    overrides:
+      batch_size: 8
+      num_workers: 0
+      # Disable error-span extraction — large per-segment span tensors
+      # are an extra source of shared-memory pressure and we don't
+      # need them for the lowres_qe correlation analysis.
+      output_seg_err_spans: false
+  - ref: comet/wmt20-comet-qe-da
+    overrides:
+      batch_size: 8
+      num_workers: 0
+
+output:
+  root: outputs
+  formats: [tsv, jsonl, summary]
