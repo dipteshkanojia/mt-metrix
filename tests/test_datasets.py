@@ -317,3 +317,57 @@ def test_load_hf_rejects_non_list_configs(monkeypatch):
     )
     with pytest.raises(ValueError, match="must be a list"):
         load_dataset_from_config(cfg)
+
+
+# ---------------------------------------------------------------------------
+# _row_to_segment — gold_raw / gold_z / legacy gold
+# ---------------------------------------------------------------------------
+
+import logging
+
+from mt_metrix.io.datasets import _row_to_segment
+
+
+def test_row_to_segment_both_gold_columns():
+    row = {"src": "hi", "tgt": "hola", "raw": "72.5", "z": "0.8"}
+    columns = {"source": "src", "target": "tgt", "gold_raw": "raw", "gold_z": "z"}
+    seg = _row_to_segment(row, columns, idx=0, default_lang_pair="en-es", default_domain="news")
+    assert seg.gold_raw == 72.5
+    assert seg.gold_z == 0.8
+
+
+def test_row_to_segment_only_gold_raw():
+    row = {"src": "hi", "tgt": "hola", "raw": "72.5"}
+    columns = {"source": "src", "target": "tgt", "gold_raw": "raw"}
+    seg = _row_to_segment(row, columns, idx=0, default_lang_pair="en-es", default_domain="news")
+    assert seg.gold_raw == 72.5
+    assert seg.gold_z is None
+
+
+def test_row_to_segment_only_gold_z():
+    row = {"src": "hi", "tgt": "hola", "z": "0.8"}
+    columns = {"source": "src", "target": "tgt", "gold_z": "z"}
+    seg = _row_to_segment(row, columns, idx=0, default_lang_pair="en-es", default_domain="news")
+    assert seg.gold_raw is None
+    assert seg.gold_z == 0.8
+
+
+def test_row_to_segment_legacy_gold_loads_into_gold_raw_with_warning(caplog):
+    """Legacy `gold: z_mean` column maps MUST continue to work but should
+    emit a deprecation-warning log so users know to migrate. It routes into
+    gold_raw by default (conservative: unknown-space → raw)."""
+    row = {"src": "hi", "tgt": "hola", "g": "0.8"}
+    columns = {"source": "src", "target": "tgt", "gold": "g"}
+    with caplog.at_level(logging.WARNING, logger="mt_metrix.io.datasets"):
+        seg = _row_to_segment(row, columns, idx=0, default_lang_pair="en-es", default_domain="news")
+    assert seg.gold_raw == 0.8
+    assert seg.gold_z is None
+    assert any("legacy `gold:` column key" in r.message for r in caplog.records)
+
+
+def test_row_to_segment_invalid_gold_values_become_none():
+    row = {"src": "hi", "tgt": "hola", "raw": "n/a", "z": ""}
+    columns = {"source": "src", "target": "tgt", "gold_raw": "raw", "gold_z": "z"}
+    seg = _row_to_segment(row, columns, idx=0, default_lang_pair="en-es", default_domain="news")
+    assert seg.gold_raw is None
+    assert seg.gold_z is None

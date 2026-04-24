@@ -44,6 +44,26 @@ def _resolve_column(row: dict[str, Any], spec: str | None) -> Any:
     return row.get(spec)
 
 
+def _resolve_gold(
+    row: dict[str, Any],
+    columns: dict[str, str],
+    *,
+    key: str,
+) -> float | None:
+    """Resolve one gold column (``gold_raw`` or ``gold_z``) to a float.
+
+    Invalid / missing / non-numeric values become ``None`` so downstream
+    correlation code can mask them out.
+    """
+    raw = _resolve_column(row, columns.get(key))
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _row_to_segment(
     row: dict[str, Any],
     columns: dict[str, str],
@@ -59,13 +79,22 @@ def _row_to_segment(
         )
 
     reference = _resolve_column(row, columns.get("reference"))
-    gold_raw = _resolve_column(row, columns.get("gold"))
-    gold: float | None = None
-    if gold_raw is not None:
-        try:
-            gold = float(gold_raw)
-        except (TypeError, ValueError):
-            gold = None
+
+    gold_raw = _resolve_gold(row, columns, key="gold_raw")
+    gold_z = _resolve_gold(row, columns, key="gold_z")
+
+    # Backward compat: legacy singular `gold:` key still accepted. We route
+    # it into gold_raw (the conservative default) and emit a one-shot-per-
+    # dataset deprecation warning so users migrate their configs to the
+    # explicit form.
+    if "gold" in columns and gold_raw is None and gold_z is None:
+        log.warning(
+            "dataset config uses legacy `gold:` column key (mapping column %r); "
+            "prefer explicit `gold_raw:` and/or `gold_z:` — this row's value "
+            "is being loaded as gold_raw. See docs/DATASETS.md.",
+            columns["gold"],
+        )
+        gold_raw = _resolve_gold(row, columns, key="gold")
 
     lang_pair = _resolve_column(row, columns.get("lang_pair")) or default_lang_pair
     domain = _resolve_column(row, columns.get("domain")) or default_domain
@@ -76,7 +105,8 @@ def _row_to_segment(
         source=str(source),
         target=str(target),
         reference=str(reference) if reference else None,
-        gold=gold,
+        gold_raw=gold_raw,
+        gold_z=gold_z,
         lang_pair=str(lang_pair),
         domain=str(domain),
         segment_id=segment_id,
