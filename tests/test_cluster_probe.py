@@ -1866,3 +1866,503 @@ def test_json_recommendation_set_even_when_equal_to_target(
     payload = jsonmod.loads(capsys.readouterr().out)
     assert payload["recommendation"] == "nice-project"
     assert payload["request"]["partition"] == "nice-project"
+
+
+# ---------------------------------------------------------------------------
+# RAM-STARVED detection (FreeMem hard-fail probe lifted from submit.sh).
+#
+# Context — 2026-04-24 incident (aisurrey35): a non-SLURM process was
+# holding ~120 GB of RAM. CfgTRES still advertised mem=125G so the
+# CfgTRES-only fit check passed, but SLURM's select/cons_tres plugin
+# rejects allocations whose --mem exceeds FreeMem regardless of
+# AllocMem. submit.sh's check 6 caught this via _check_freemem; check 5
+# (the python recommender) did NOT, so it still ranked nice-project as
+# alternative #1 with "wait: now; tier=1" — sending the user back
+# towards a partition that would hard-reject. These tests lift the
+# FreeMem signal into the probe so check 5 demotes RAM-STARVED
+# partitions to a tier above NO-FIT but below CONTESTED (the squatter
+# can clear, so it's transient — but until then SLURM cannot place the
+# job on this partition no matter how patient we are).
+# ---------------------------------------------------------------------------
+
+# A single-node nice-project where FreeMem is way below the 120 GB the
+# user asked for. Mirrors the real aisurrey35 line on 2026-04-24.
+RAM_STARVED_NICE_PROJECT_SCONTROL = (
+    "NodeName=aisurrey35 Arch=x86_64 CPUTot=14 "
+    "RealMemory=128000 FreeMem=4687 "
+    "State=MIXED "
+    "Gres=gpu:nvidia_l40s:2(IDX:0-1) "
+    "Partitions=nice-project "
+    "AllocTRES=cpu=4,mem=16G,gres/gpu=0,gres/gpu:nvidia_l40s=0 "
+    "CfgTRES=cpu=14,mem=125G,gres/gpu=2,gres/gpu:nvidia_l40s=2"
+)
+
+
+def test_parse_scontrol_extracts_free_mem_mb(probe):
+    """``FreeMem=N`` in scontrol output is reported in megabytes; the parser
+    must surface it on the Node so the recommender can compare against
+    --mem (which build_request normalises to MB)."""
+    n = probe.parse_scontrol_node_line(RAM_STARVED_NICE_PROJECT_SCONTROL)
+    assert n is not None
+    assert n.free_mem_mb == 4687, (
+        f"expected FreeMem=4687 to populate node.free_mem_mb, got {n.free_mem_mb}"
+    )
+
+
+def test_parse_scontrol_free_mem_missing_defaults_to_zero(probe):
+    """Older scontrol output (or a node where the daemon hasn't reported
+    yet) omits FreeMem entirely. Default to 0 so check_fit treats it as
+    'unknown' rather than 'starved'."""
+    line_no_freemem = (
+        "NodeName=aisurrey99 Arch=x86_64 CPUTot=16 "
+        "RealMemory=128000 "
+        "State=IDLE "
+        "Gres=gpu:nvidia_l40s:2(IDX:0-1) "
+        "Partitions=experimental "
+        "AllocTRES= "
+        "CfgTRES=cpu=16,mem=125G,gres/gpu=2,gres/gpu:nvidia_l40s=2"
+    )
+    n = probe.parse_scontrol_node_line(line_no_freemem)
+    assert n is not None
+    assert n.free_mem_mb == 0
+
+
+# A partition with one drained node (FreeMem high, but unschedulable)
+# and one usable node (FreeMem low). The aggregator's max_free_mem_mb
+# must reflect only the usable node — SLURM cannot place jobs on the
+# drained one, so its FreeMem is irrelevant to whether the partition
+# can satisfy --mem right now.
+DRAINED_PLUS_STARVED_SCONTROL = "\n".join([
+    "NodeName=aisurrey26 Arch=x86_64 CPUTot=16 "
+    "RealMemory=128000 FreeMem=120000 "
+    "State=DRAIN+DOWN "
+    "Gres=gpu:nvidia_l40s:2(IDX:0-1) "
+    "Partitions=ram_pool "
+    "AllocTRES= "
+    "CfgTRES=cpu=14,mem=125G,gres/gpu=2,gres/gpu:nvidia_l40s=2",
+
+    "NodeName=aisurrey27 Arch=x86_64 CPUTot=16 "
+    "RealMemory=128000 FreeMem=4687 "
+    "State=MIXED "
+    "Gres=gpu:nvidia_l40s:2(IDX:0-1) "
+    "Partitions=ram_pool "
+    "AllocTRES= "
+    "CfgTRES=cpu=14,mem=125G,gres/gpu=2,gres/gpu:nvidia_l40s=2",
+])
+
+
+def test_aggregate_partitions_max_free_mem_excludes_drained(probe):
+    """Drained node with high FreeMem must NOT inflate the partition's
+    max_free_mem_mb — SLURM can't schedule there."""
+    parts = _build_partition_with_queue(
+        probe, DRAINED_PLUS_STARVED_SCONTROL, [],
+    )
+    p = parts["ram_pool"]
+    assert p.nodes_total == 2
+    assert p.nodes_usable == 1
+    assert p.max_free_mem_mb == 4687, (
+        f"max_free_mem_mb must come from the usable node only, "
+        f"got {p.max_free_mem_mb}"
+    )
+
+
+def test_aggregate_partitions_max_free_mem_picks_largest_usable(probe):
+    """Multiple usable nodes → ``max_free_mem_mb`` picks the largest, since
+    SLURM only needs one node that satisfies --mem to place the job."""
+    fixture = "\n".join([
+        "NodeName=aisurrey40 Arch=x86_64 CPUTot=16 "
+        "RealMemory=128000 FreeMem=4687 "
+        "State=MIXED "
+        "Gres=gpu:nvidia_l40s:2(IDX:0-1) "
+        "Partitions=mixed_freemem "
+        "AllocTRES= "
+        "CfgTRES=cpu=14,mem=125G,gres/gpu=2,gres/gpu:nvidia_l40s=2",
+
+        "NodeName=aisurrey41 Arch=x86_64 CPUTot=16 "
+        "RealMemory=128000 FreeMem=110000 "
+        "State=IDLE "
+        "Gres=gpu:nvidia_l40s:2(IDX:0-1) "
+        "Partitions=mixed_freemem "
+        "AllocTRES= "
+        "CfgTRES=cpu=14,mem=125G,gres/gpu=2,gres/gpu:nvidia_l40s=2",
+    ])
+    parts = _build_partition_with_queue(probe, fixture, [])
+    p = parts["mixed_freemem"]
+    assert p.max_free_mem_mb == 110000
+
+
+def test_aggregate_partitions_max_free_mem_zero_when_unreported(probe):
+    """A partition whose nodes don't expose FreeMem (e.g. SCONTROL_FIXTURE
+    pre-dating this change) must report ``max_free_mem_mb == 0`` so
+    check_fit can short-circuit and treat FreeMem as unknown."""
+    _, parts = _parse_all(probe)
+    # SCONTROL_FIXTURE has no FreeMem on any node — every partition's
+    # max_free_mem_mb must default to 0.
+    for name, p in parts.items():
+        assert p.max_free_mem_mb == 0, (
+            f"partition {name}: expected max_free_mem_mb=0 (unreported), "
+            f"got {p.max_free_mem_mb}"
+        )
+
+
+def test_check_fit_ram_starved_when_freemem_below_request(probe):
+    """nice-project FreeMem=4687MB; the user asked for --mem=120G (≈122880MB).
+    The partition still has free GPUs and the shape is fine, but SLURM
+    will hard-reject the allocation. The probe must surface this with
+    ``ram_starved=True`` and the dedicated ``ram-starved`` status word."""
+    parts = _build_partition_with_queue(
+        probe, RAM_STARVED_NICE_PROJECT_SCONTROL, [],
+    )
+    p = parts["nice-project"]
+    assert p.max_free_mem_mb == 4687
+    assert p.gpus_free == 2  # both L40s idle on aisurrey35 in this fixture
+    req = probe.Request(
+        partition="nice-project", gpus=1, mem_mb=120 * 1024,
+        cpus=0, vram_need_gb=8,
+    )
+    fit = probe.check_fit(p, req)
+    assert fit.shape_ok is True, (
+        f"RAM starvation is transient, not a shape violation — "
+        f"shape_ok must remain True; got reasons={fit.reasons}"
+    )
+    assert fit.ram_starved is True, (
+        f"FreeMem (4687MB) < --mem (122880MB) on every usable node — "
+        f"ram_starved must be True"
+    )
+    assert fit.status_word() == "ram-starved"
+    # Reason string mentions FreeMem so the user knows what was wrong.
+    assert any("FreeMem" in r for r in fit.reasons), fit.reasons
+
+
+def test_check_fit_not_ram_starved_when_freemem_unknown(probe):
+    """SCONTROL_FIXTURE has no FreeMem fields → max_free_mem_mb=0. We
+    must NOT infer starvation from absent data — that would falsely
+    demote every partition the moment scontrol omits FreeMem."""
+    _, parts = _parse_all(probe)
+    p = parts["nice-project"]
+    assert p.max_free_mem_mb == 0
+    req = probe.Request(
+        partition="nice-project", gpus=1, mem_mb=120 * 1024,
+        cpus=0, vram_need_gb=8,
+    )
+    fit = probe.check_fit(p, req)
+    assert fit.ram_starved is False
+    assert fit.status_word() != "ram-starved"
+
+
+def test_check_fit_not_ram_starved_when_request_zero(probe):
+    """If the user didn't supply --mem (req.mem_mb=0) we have no comparison
+    to make — ram_starved must stay False even when FreeMem is tiny."""
+    parts = _build_partition_with_queue(
+        probe, RAM_STARVED_NICE_PROJECT_SCONTROL, [],
+    )
+    p = parts["nice-project"]
+    req = probe.Request(
+        partition="nice-project", gpus=1, mem_mb=0, cpus=0, vram_need_gb=8,
+    )
+    fit = probe.check_fit(p, req)
+    assert fit.ram_starved is False
+
+
+def test_check_fit_not_ram_starved_when_freemem_meets_request(probe):
+    """FreeMem (110000MB) ≥ --mem (8 GB) — partition is healthy."""
+    fixture = (
+        "NodeName=aisurrey42 Arch=x86_64 CPUTot=16 "
+        "RealMemory=128000 FreeMem=110000 "
+        "State=IDLE "
+        "Gres=gpu:nvidia_l40s:2(IDX:0-1) "
+        "Partitions=healthy_pool "
+        "AllocTRES= "
+        "CfgTRES=cpu=14,mem=125G,gres/gpu=2,gres/gpu:nvidia_l40s=2"
+    )
+    parts = _build_partition_with_queue(probe, fixture, [])
+    p = parts["healthy_pool"]
+    req = probe.Request(
+        partition="healthy_pool", gpus=1, mem_mb=8 * 1024,
+        cpus=0, vram_need_gb=8,
+    )
+    fit = probe.check_fit(p, req)
+    assert fit.ram_starved is False
+    assert fit.status_word() == "ready"
+
+
+def test_check_fit_ram_starved_takes_priority_over_contested(probe):
+    """If a partition is BOTH ram-starved AND has 0 free GPUs, the
+    status_word must surface the ram-starved verdict — that's the
+    actionable signal (queueing won't help, the squatter must clear)."""
+    fixture = (
+        "NodeName=aisurrey60 Arch=x86_64 CPUTot=16 "
+        "RealMemory=128000 FreeMem=4000 "
+        "State=ALLOCATED "
+        "Gres=gpu:nvidia_l40s:2(IDX:0-1) "
+        "Partitions=double_blocked "
+        "AllocTRES=cpu=14,mem=120G,gres/gpu=2,gres/gpu:nvidia_l40s=2 "
+        "CfgTRES=cpu=14,mem=125G,gres/gpu=2,gres/gpu:nvidia_l40s=2"
+    )
+    parts = _build_partition_with_queue(probe, fixture, [])
+    p = parts["double_blocked"]
+    assert p.gpus_free == 0
+    req = probe.Request(
+        partition="double_blocked", gpus=1, mem_mb=120 * 1024,
+        cpus=0, vram_need_gb=8,
+    )
+    fit = probe.check_fit(p, req)
+    assert fit.has_capacity_now is False
+    assert fit.ram_starved is True
+    assert fit.status_word() == "ram-starved"
+
+
+# ---------------------------------------------------------------------------
+# pick_recommended: demotion of RAM-STARVED partitions.
+# ---------------------------------------------------------------------------
+
+# Two-partition scenario for the recommender. nice-project is RAM-starved
+# (FreeMem=4687MB on the only usable node), l40s_risk is healthy
+# (FreeMem=124000MB, comfortably above --mem=120G=122880MB) but its only
+# GPU is allocated → CONTESTED. Both fit the shape; the user wants 1×
+# 48 GB GPU and --mem=120G.
+RAM_VS_CONTESTED_SCONTROL = "\n".join([
+    # nice-project: free GPU but RAM starved
+    "NodeName=aisurrey35 Arch=x86_64 CPUTot=14 "
+    "RealMemory=128000 FreeMem=4687 "
+    "State=MIXED "
+    "Gres=gpu:nvidia_l40s:2(IDX:0-1) "
+    "Partitions=nice-project "
+    "AllocTRES=cpu=4,mem=16G,gres/gpu=0,gres/gpu:nvidia_l40s=0 "
+    "CfgTRES=cpu=14,mem=125G,gres/gpu=2,gres/gpu:nvidia_l40s=2",
+
+    # l40s_risk: contested (all GPUs allocated) but RAM is fine —
+    # FreeMem=124000MB > request --mem=120G=122880MB so the RAM-starved
+    # check passes and the node is merely waiting on GPU.
+    "NodeName=aisurrey27 Arch=x86_64 CPUTot=16 "
+    "RealMemory=128000 FreeMem=124000 "
+    "State=ALLOCATED "
+    "Gres=gpu:nvidia_l40s:2(IDX:0-1) "
+    "Partitions=l40s_risk "
+    "AllocTRES=cpu=14,mem=120G,gres/gpu=2,gres/gpu:nvidia_l40s=2 "
+    "CfgTRES=cpu=14,mem=125G,gres/gpu=2,gres/gpu:nvidia_l40s=2",
+])
+
+
+def test_pick_recommended_demotes_ram_starved_below_contested(probe):
+    """nice-project (tier 1) is RAM-starved; l40s_risk (tier 2) is merely
+    contested. The recommender must rank l40s_risk above nice-project
+    even though nice-project would normally win on tier — RAM starvation
+    is a hard reject SLURM keeps refusing, while contention is a
+    queue-and-wait the scheduler handles for us."""
+    nodes = [
+        n for line in RAM_VS_CONTESTED_SCONTROL.splitlines()
+        if (n := probe.parse_scontrol_node_line(line)) is not None
+    ]
+    parts_map = probe.aggregate_partitions(nodes)
+    # Give l40s_risk a single running job with a known finite finish time
+    # so the recommender has a real wait_s to compare.
+    jobs = [
+        probe.Job(
+            job_id="J1", partition="l40s_risk", state="RUNNING",
+            time_left_s=1800, time_used_s=0, num_gpus=2,
+            reason="None", user="u",
+        ),
+    ]
+    probe.attach_queue_stats(parts_map, jobs)
+    partitions = sorted(parts_map.values(), key=lambda p: p.name)
+    req = probe.Request(
+        partition="nice-project", gpus=1, mem_mb=120 * 1024,
+        cpus=0, vram_need_gb=8,
+    )
+    fits = {p.name: probe.check_fit(p, req) for p in partitions}
+    assert fits["nice-project"].ram_starved is True
+    assert fits["l40s_risk"].ram_starved is False
+    recommended, alternatives = probe.pick_recommended(partitions, fits, req)
+    # Both partitions are still eligible, but l40s_risk wins.
+    assert recommended == "l40s_risk", (
+        f"l40s_risk (CONTESTED) must outrank nice-project (RAM-STARVED); "
+        f"got recommendation {recommended}"
+    )
+    nice_alt = next((a for a in alternatives if a.partition == "nice-project"), None)
+    l40s_alt = next((a for a in alternatives if a.partition == "l40s_risk"), None)
+    assert nice_alt is not None and l40s_alt is not None, alternatives
+    assert alternatives.index(l40s_alt) < alternatives.index(nice_alt)
+
+
+def test_pick_recommended_includes_ram_starved_when_only_option(probe):
+    """If RAM-STARVED is the ONLY shape-fitting partition, it must still
+    appear in alternatives — better than no recommendation at all, and
+    the squatter may clear before the user retries."""
+    parts = _build_partition_with_queue(
+        probe, RAM_STARVED_NICE_PROJECT_SCONTROL, [],
+    )
+    partitions = sorted(parts.values(), key=lambda p: p.name)
+    req = probe.Request(
+        partition="nice-project", gpus=1, mem_mb=120 * 1024,
+        cpus=0, vram_need_gb=8,
+    )
+    fits = {p.name: probe.check_fit(p, req) for p in partitions}
+    recommended, alternatives = probe.pick_recommended(partitions, fits, req)
+    assert recommended == "nice-project"
+    assert any(a.partition == "nice-project" for a in alternatives)
+
+
+def test_a100_penalty_does_not_apply_when_only_alt_is_ram_starved(probe):
+    """A RAM-starved nice-project must not count as a 'non-a100 ready
+    partition' that triggers the a100 tier penalty — the partition cannot
+    actually accept the job, so a100 should compete on equal terms."""
+    nodes = [
+        n for line in RAM_VS_CONTESTED_SCONTROL.splitlines()
+        if (n := probe.parse_scontrol_node_line(line)) is not None
+    ]
+    # Add a free a100 node with plenty of FreeMem so it's a clean ready.
+    a100_line = (
+        "NodeName=aisurrey01 Arch=x86_64 CPUTot=32 "
+        "RealMemory=512000 FreeMem=480000 "
+        "State=IDLE "
+        "Gres=gpu:nvidia_a100:4(IDX:0-3) "
+        "Partitions=a100 "
+        "AllocTRES= "
+        "CfgTRES=cpu=32,mem=500G,gres/gpu=4,gres/gpu:nvidia_a100=4"
+    )
+    n = probe.parse_scontrol_node_line(a100_line)
+    assert n is not None
+    nodes.append(n)
+    parts_map = probe.aggregate_partitions(nodes)
+    # l40s_risk is the contested-but-healthy alternative; we want it to
+    # ALSO be unavailable for this scenario so a100 has no other ready
+    # competitor — set its GPUs allocated and add a long-running job.
+    probe.attach_queue_stats(parts_map, [
+        probe.Job(
+            job_id="J1", partition="l40s_risk", state="RUNNING",
+            time_left_s=72 * 3600, time_used_s=0, num_gpus=2,
+            reason="None", user="u",
+        ),
+    ])
+    partitions = sorted(parts_map.values(), key=lambda p: p.name)
+    req = probe.Request(
+        partition="a100", gpus=1, mem_mb=120 * 1024,
+        cpus=0, vram_need_gb=8,
+    )
+    fits = {p.name: probe.check_fit(p, req) for p in partitions}
+    # Sanity: a100 ready, nice-project ram-starved, l40s_risk contested.
+    assert fits["a100"].status_word() == "ready"
+    assert fits["nice-project"].status_word() == "ram-starved"
+    assert fits["l40s_risk"].status_word() == "contested"
+    recommended, _ = probe.pick_recommended(partitions, fits, req)
+    # Without the fix, the RAM-starved nice-project would trigger the
+    # a100 penalty (tier 5+4=9) and l40s_risk's 3-day wait would still
+    # outrank a100. With the fix, a100 is the recommendation.
+    assert recommended == "a100", (
+        f"a100 should win when no non-a100 partition is genuinely ready; "
+        f"got {recommended}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# render_table: RAM-STARVED tag in the survey.
+# ---------------------------------------------------------------------------
+
+def test_render_table_shows_ram_starved_tag(probe):
+    """The survey table must surface RAM-STARVED so the user understands
+    why a tier-1 partition got demoted."""
+    parts = _build_partition_with_queue(
+        probe, RAM_STARVED_NICE_PROJECT_SCONTROL, [],
+    )
+    partitions = sorted(parts.values(), key=lambda p: p.name)
+    req = probe.Request(
+        partition="nice-project", gpus=1, mem_mb=120 * 1024,
+        cpus=0, vram_need_gb=8,
+    )
+    fits = {p.name: probe.check_fit(p, req) for p in partitions}
+    table = probe.render_table(partitions, fits, req, colour=False)
+    assert "RAM-STARVED" in table
+
+
+# ---------------------------------------------------------------------------
+# End-to-end main(): the 2026-04-24 reproduction.
+# ---------------------------------------------------------------------------
+
+# Two partitions where nice-project is RAM-starved and a100 is healthy.
+# The user submits with --partition=a100 --mem=120G; the recommender must
+# NOT promote nice-project to slot #1 just because its tier is 1.
+LIVE_2026_04_24_SCONTROL = "\n".join([
+    "NodeName=aisurrey35 Arch=x86_64 CPUTot=14 "
+    "RealMemory=128000 FreeMem=4687 "
+    "State=MIXED "
+    "Gres=gpu:nvidia_l40s:2(IDX:0-1) "
+    "Partitions=nice-project "
+    "AllocTRES=cpu=4,mem=16G,gres/gpu=0,gres/gpu:nvidia_l40s=0 "
+    "CfgTRES=cpu=14,mem=125G,gres/gpu=2,gres/gpu:nvidia_l40s=2",
+
+    "NodeName=aisurrey01 Arch=x86_64 CPUTot=32 "
+    "RealMemory=512000 FreeMem=480000 "
+    "State=IDLE "
+    "Gres=gpu:nvidia_a100:4(IDX:0-3) "
+    "Partitions=a100 "
+    "AllocTRES= "
+    "CfgTRES=cpu=32,mem=500G,gres/gpu=4,gres/gpu:nvidia_a100=4",
+])
+
+
+def test_main_2026_04_24_does_not_recommend_ram_starved_nice_project(
+    probe, monkeypatch, tmp_path,
+):
+    """Reproduction of the 2026-04-24 incident: with nice-project's
+    nodes RAM-starved, the alternatives TSV must NOT name nice-project
+    as the rank-1 alternative — that would invite the user back to a
+    partition SLURM is currently rejecting."""
+    monkeypatch.setattr(
+        probe, "run_scontrol_show_node", lambda: LIVE_2026_04_24_SCONTROL,
+    )
+    monkeypatch.setattr(probe, "run_squeue", lambda: "")
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("scorers:\n  - ref: comet/wmt22-cometkiwi-da\n")
+    tee = tmp_path / "alts.tsv"
+    rc = probe.main([
+        "--config", str(cfg),
+        "--partition", "a100", "--gpus", "1",
+        "--mem", "120G",
+        "--slurm-script", "/dev/null",
+        "--tee-alternatives", str(tee),
+        "--no-colour",
+    ])
+    # a100 is healthy → exit 0.
+    assert rc == 0, f"expected READY (exit 0), got {rc}"
+    lines = tee.read_text().splitlines()
+    # Header + at least one alternative row.
+    assert lines[0].startswith("rank\tpartition")
+    rank1 = lines[1].split("\t")
+    assert rank1[0] == "1"
+    assert rank1[1] != "nice-project", (
+        f"rank-1 alternative must not be the RAM-starved nice-project; "
+        f"got '{rank1[1]}' — full TSV:\n{tee.read_text()}"
+    )
+
+
+def test_main_target_ram_starved_returns_nonzero_and_names_starvation(
+    probe, monkeypatch, tmp_path, capsys,
+):
+    """When the user *targets* a RAM-starved partition (e.g. they pass
+    -p nice-project on 2026-04-24), main must not return 0 — submit.sh
+    relies on the exit code to decide whether to proceed. The output
+    must also call the starvation out by name so the user understands
+    why their ostensibly-free partition is being refused."""
+    monkeypatch.setattr(
+        probe, "run_scontrol_show_node", lambda: LIVE_2026_04_24_SCONTROL,
+    )
+    monkeypatch.setattr(probe, "run_squeue", lambda: "")
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text("scorers:\n  - ref: comet/wmt22-cometkiwi-da\n")
+    rc = probe.main([
+        "--config", str(cfg),
+        "--partition", "nice-project", "--gpus", "1",
+        "--mem", "120G",
+        "--slurm-script", "/dev/null",
+        "--no-colour",
+    ])
+    captured = capsys.readouterr()
+    assert rc != 0, (
+        f"target=nice-project is RAM-starved; main must NOT return 0 — "
+        f"got rc={rc}\nstdout:\n{captured.out}\nstderr:\n{captured.err}"
+    )
+    combined = captured.out + captured.err
+    assert "RAM-STARVED" in combined or "RAM-starved" in combined, (
+        f"output must surface the RAM-starved verdict; got:\n{combined}"
+    )

@@ -374,6 +374,11 @@ class Node:
     gpu_alloc: int
     realmemory_mb: int
     cpus: int
+    # OS-visible free RAM in MB, lifted from ``scontrol`` so the
+    # recommender can mirror submit.sh's _check_freemem hard-fail probe.
+    # 0 = unreported (older daemon, parse miss); callers treat unknown
+    # FreeMem as 'don't penalise'.
+    free_mem_mb: int = 0
 
     @property
     def gpu_free(self) -> int:
@@ -584,6 +589,15 @@ def parse_scontrol_node_line(line: str) -> Optional[Node]:
         cpus = cfg_cpus or int(cpus_raw) if cpus_raw else cfg_cpus
     except ValueError:
         cpus = cfg_cpus
+    # FreeMem is reported by scontrol in megabytes (no unit suffix). 0
+    # when missing or unparseable — callers treat that as 'unknown'.
+    free_mem_mb = 0
+    raw_free_mem = kv.get("FreeMem", "")
+    if raw_free_mem:
+        try:
+            free_mem_mb = int(raw_free_mem)
+        except ValueError:
+            free_mem_mb = 0
     return Node(
         name=name,
         partitions=partitions,
@@ -594,6 +608,7 @@ def parse_scontrol_node_line(line: str) -> Optional[Node]:
         gpu_alloc=gpu_alloc,
         realmemory_mb=realmemory_mb,
         cpus=cpus,
+        free_mem_mb=free_mem_mb,
     )
 
 
@@ -644,6 +659,12 @@ class Partition:
     unknown_gpu_types: list[str] = field(default_factory=list)
     max_mem_mb: int = 0
     max_cpus: int = 0
+    # Largest OS-visible FreeMem (MB) across the partition's USABLE nodes.
+    # Distinct from ``max_mem_mb`` (CfgTRES schedulable ceiling): SLURM's
+    # select/cons_tres plugin compares --mem to FreeMem, not AllocMem, so
+    # a non-SLURM RAM squatter can starve a partition even when CfgTRES
+    # still advertises full capacity. 0 = unreported, treated as unknown.
+    max_free_mem_mb: int = 0
     # Largest GPU count on any single node in the partition — this is the
     # per-node ceiling SLURM will enforce on --gres=gpu:N requests.
     max_gpu_per_node: int = 0
@@ -720,6 +741,11 @@ def aggregate_partitions(nodes: list[Node]) -> dict[str, Partition]:
                 part.max_mem_mb = n.realmemory_mb
             if n.cpus > part.max_cpus:
                 part.max_cpus = n.cpus
+            # FreeMem only matters on USABLE nodes — a drained node's
+            # spare RAM can't host the job, so it must not rescue the
+            # partition's max_free_mem_mb from a starvation verdict.
+            if n.is_usable and n.free_mem_mb > part.max_free_mem_mb:
+                part.max_free_mem_mb = n.free_mem_mb
             if n.gpu_total > part.max_gpu_per_node:
                 part.max_gpu_per_node = n.gpu_total
     return parts
@@ -859,17 +885,28 @@ class FitStatus:
       partition. When False, the partition gets UNKNOWN-VRAM status in
       the survey table and is not recommended as an alternative — we
       can't stand behind it without verifying.
+    - ``ram_starved``: every usable node's FreeMem is below the request's
+      --mem. SLURM's select/cons_tres plugin compares --mem to FreeMem
+      (not AllocMem), so even if CfgTRES still advertises full capacity
+      a non-SLURM RAM squatter will hard-reject the allocation.
+      Distinct from ``shape_ok`` because the situation is transient —
+      the squatter can clear — but distinct from ``contested`` because
+      queueing on a starved partition does NOT help (SLURM keeps
+      hard-rejecting on each retry until FreeMem clears).
     """
 
     partition: str
     shape_ok: bool
     has_capacity_now: bool
     vram_known: bool = True
+    ram_starved: bool = False
     reasons: list[str] = field(default_factory=list)
 
     def status_word(self) -> str:
         if not self.shape_ok:
             return "no-fit"
+        if self.ram_starved:
+            return "ram-starved"
         if not self.has_capacity_now:
             return "contested"
         if not self.vram_known:
@@ -940,11 +977,28 @@ def check_fit(part: Partition, req: Request) -> FitStatus:
     # no unknown type that could under/over-shoot the reported max. If
     # some nodes have unknown VRAM, we can't promise the max is real.
     vram_known = part.vram_known and not part.unknown_gpu_types
+    # RAM starvation: only meaningful when both --mem AND FreeMem are
+    # known. Missing either means we can't make a comparison, so the
+    # partition stays free of the ram-starved verdict (the alternative
+    # — defaulting to True on missing data — would falsely demote every
+    # partition the moment scontrol omits FreeMem).
+    ram_starved = bool(
+        req.mem_mb
+        and part.max_free_mem_mb
+        and req.mem_mb > part.max_free_mem_mb
+    )
+    if ram_starved:
+        reasons.append(
+            f"FreeMem on every usable node is below --mem={req.mem_mb}M "
+            f"(max={part.max_free_mem_mb}M); SLURM will hard-reject "
+            f"until the squatter process clears"
+        )
     return FitStatus(
         partition=part.name,
         shape_ok=shape_ok,
         has_capacity_now=has_capacity_now,
         vram_known=vram_known,
+        ram_starved=ram_starved,
         reasons=reasons,
     )
 
@@ -986,19 +1040,22 @@ def render_table(
     lines.append(header)
     lines.append("  " + "-" * (len(header) - 2))
     def sort_key(p: Partition) -> tuple[int, int, int]:
-        """Sort ranks: target=0, ready=1, contested=2, unknown-vram=3, blocklist=4, no-fit=5, fit-missing=6."""
+        """Sort ranks: target=0, ready=1, contested=2, unknown-vram=3,
+        ram-starved=4 (above no-fit because the squatter may clear),
+        blocklist=5, no-fit=6, fit-missing=7."""
         fit = fits.get(p.name)
         if p.name == req.partition:
             return (0, 0, 0)
         if fit is None:
-            return (6, 0, 0)
+            return (7, 0, 0)
         if is_blocklisted(p.name):
-            return (4, 0, 0)
+            return (5, 0, 0)
         rank = {
             "ready": 1,
             "contested": 2,
             "unknown-vram": 3,
-            "no-fit": 5,
+            "ram-starved": 4,
+            "no-fit": 6,
         }[fit.status_word()]
         return (rank, -p.gpus_free, 0)
     has_mixed_any = False
@@ -1019,6 +1076,10 @@ def render_table(
                 colour_code, tag = c["yel"], "CONTESTED"
             elif status == "unknown-vram":
                 colour_code, tag = c["yel"], "UNKNOWN-VRAM"
+            elif status == "ram-starved":
+                # Yellow rather than red: transient (squatter can clear),
+                # but more severe than CONTESTED because queueing won't help.
+                colour_code, tag = c["yel"], "RAM-STARVED"
             elif status == "no-fit":
                 colour_code, tag = c["red"], "NO-FIT"
             else:
@@ -1031,8 +1092,13 @@ def render_table(
             has_mixed_any = True
         vram = f"{p.max_vram_gb}G" if p.max_vram_gb else "—"
         # next free: "now" if ready + capacity; HHhMMm if running job has a
-        # known time left; "?" otherwise.
-        if p.gpus_free >= req.gpus and not blocked:
+        # known time left; "?" otherwise. RAM-starved partitions are an
+        # explicit "?" — they have free GPUs but SLURM will hard-reject
+        # until the squatter clears, so promising "now" would be a lie.
+        is_ram_starved = fit is not None and fit.status_word() == "ram-starved"
+        if blocked or is_ram_starved:
+            nf = "?"
+        elif p.gpus_free >= req.gpus:
             nf = "now"
         elif p.earliest_free_s is not None:
             hh = p.earliest_free_s // 3600
@@ -1079,11 +1145,13 @@ def _a100_penalty_applies(
     """True iff a100 should be de-prioritised for this request.
 
     a100 gets a +4 tier penalty when ``vram_need <= 48`` AND at least
-    one non-a100 partition is both READY (``has_capacity_now``) and
-    VRAM-known. That's the 'don't waste the 80 GB card when 48 GB is
-    idle' case. When vram_need > 48 OR every non-a100 option is
-    contested/unknown, the penalty drops and a100 competes on equal
-    tier terms.
+    one non-a100 partition is genuinely READY — has free GPUs, known
+    VRAM, AND is not RAM-starved. That's the 'don't waste the 80 GB
+    card when 48 GB is idle' case. When vram_need > 48 OR every
+    non-a100 option is contested / unknown / RAM-starved, the penalty
+    drops and a100 competes on equal tier terms (RAM-starved partitions
+    cannot host the job, so they must not preserve the penalty against
+    a working a100).
     """
     if vram_need_gb > 48:
         return False
@@ -1093,7 +1161,7 @@ def _a100_penalty_applies(
         fit = fits.get(p.name)
         if fit is None:
             continue
-        if fit.has_capacity_now and fit.vram_known:
+        if fit.has_capacity_now and fit.vram_known and not fit.ram_starved:
             return True
     return False
 
@@ -1110,10 +1178,14 @@ def pick_recommended(
       - shape_ok AND vram_known
       - max_vram_gb >= req.vram_need_gb (or vram_need_gb is 0 / default)
 
+    RAM-starved partitions stay eligible: the squatter process may
+    clear, so they're better than nothing. They're demoted via
+    ``availability_rank`` instead.
+
     Ranking tuple (ascending; lower is better):
-      (ready_now_rank,
+      (availability_rank,        # 0 ready, 1 contested, 2 ram-starved
        tier + a100_penalty,
-       wait_s_sortable,        # 0 if ready_now else wait_s; None → _WAIT_UNKNOWN
+       wait_s_sortable,          # 0 if ready, else wait_s; None → _WAIT_UNKNOWN
        vram_waste_gb,
        -gpus_free)
 
@@ -1144,29 +1216,48 @@ def pick_recommended(
     # mapping so ``estimate_wait_s`` runs at most once per partition.
     # A missing key means "ready now" (wait is 0); a present ``None``
     # value means squeue info was incomplete (callers render ``?``).
+    # RAM-starved partitions get a ``None`` wait estimate — the squatter
+    # may clear at any time, but we have no observable signal for when.
     wait_estimates: dict[str, Optional[int]] = {}
     for p in eligible:
-        if not fits[p.name].has_capacity_now:
+        fit = fits[p.name]
+        if fit.ram_starved:
+            wait_estimates[p.name] = None
+        elif not fit.has_capacity_now:
             wait_estimates[p.name] = estimate_wait_s(p, req.gpus)
+
+    def _availability_rank(fit: "FitStatus") -> int:
+        # 2 = RAM-starved (worst eligible: SLURM keeps hard-rejecting)
+        # 1 = contested  (queueable: SLURM will start when GPUs free)
+        # 0 = ready      (free GPUs, RAM fine, fits everywhere)
+        if fit.ram_starved:
+            return 2
+        if not fit.has_capacity_now:
+            return 1
+        return 0
 
     def score(p: "Partition") -> tuple[int, int, int, int, int]:
         fit = fits[p.name]
-        ready_now = fit.has_capacity_now
-        ready_now_rank = 0 if ready_now else 1
+        availability_rank = _availability_rank(fit)
         tier = partition_tier(p.name)
         a100_bonus = A100_TIER_PENALTY if (p.name == "a100" and a100_penalty_on) else 0
-        if ready_now:
+        if availability_rank == 0:
             wait_key = 0
         else:
             w = wait_estimates[p.name]
             wait_key = _WAIT_UNKNOWN if w is None else w
         vram_waste = max(p.max_vram_gb - req.vram_need_gb, 0)
-        return (ready_now_rank, tier + a100_bonus, wait_key, vram_waste, -p.gpus_free)
+        return (availability_rank, tier + a100_bonus, wait_key, vram_waste, -p.gpus_free)
 
     ranked = sorted(eligible, key=score)
 
     def _reason(p: "Partition") -> str:
         fit = fits[p.name]
+        if fit.ram_starved:
+            return (
+                "RAM-starved (FreeMem below --mem); transient — "
+                "squatter must clear before SLURM accepts the job"
+            )
         if fit.has_capacity_now:
             if partition_tier(p.name) == 1:
                 return "free now, group partition"
@@ -1179,7 +1270,12 @@ def pick_recommended(
     alternatives: list[Alternative] = []
     for p in ranked[:MAX_ALTERNATIVES]:
         fit = fits[p.name]
-        wait_s: Optional[int] = 0 if fit.has_capacity_now else wait_estimates[p.name]
+        if fit.ram_starved:
+            wait_s: Optional[int] = wait_estimates[p.name]  # None
+        elif fit.has_capacity_now:
+            wait_s = 0
+        else:
+            wait_s = wait_estimates[p.name]
         alternatives.append(
             Alternative(
                 partition=p.name,
@@ -1395,6 +1491,19 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"  → {req.partition}: NO-FIT — " + "; ".join(tf.reasons))
             if recommended:
                 print(f"    Try: scripts/submit.sh <config> -p {recommended}")
+        elif tf.ram_starved:
+            # OS-visible FreeMem is below --mem on every usable node, so
+            # SLURM's select/cons_tres plugin will hard-reject sbatch even
+            # though the partition has free GPUs. Surface this distinctly
+            # — queueing won't help; the squatter holding host RAM has to
+            # clear first.
+            print(f"  → {req.partition}: RAM-STARVED — " + "; ".join(tf.reasons))
+            if recommended:
+                print(f"    Immediately available alternative: "
+                      f"scripts/submit.sh <config> -p {recommended}")
+            else:
+                print("    No ready alternative; wait for the squatter "
+                      "process to clear, then re-run submit.sh.")
         elif not tf.has_capacity_now:
             print(f"  → {req.partition}: CONTESTED — shape fits but 0 "
                   f"free GPUs right now.")
@@ -1444,6 +1553,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 4
     if not target_fit.shape_ok:
         return 1
+    if target_fit.ram_starved:
+        # Same exit code as CONTESTED — submit.sh's caller knows to halt
+        # and inspect rather than auto-proceed; the partition shape is
+        # fine, only the OS-level RAM is borrowed.
+        return 2
     if not target_fit.has_capacity_now:
         return 2
     return 0
