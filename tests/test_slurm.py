@@ -314,22 +314,29 @@ def test_submit_sh_runs_cluster_probe_before_test_only():
 
 
 def test_submit_sh_maps_cluster_probe_exit_codes():
-    """submit.sh must distinguish probe exit codes: 0 ready, 1 no-fit
-    (hard fail), 2 contested (warn + grace), 3 probe failed (proceed)."""
+    """submit.sh must distinguish probe exit codes: 0 ready, 1 no-fit (fail),
+    2 contested (interactive prompt), 3 probe failed (proceed), 4 nothing-fits
+    (fail), 5 blocklisted-target (fail)."""
     txt = resolve_submit_script(REPO_ROOT).read_text()
-    # All four case arms must be handled explicitly (we branch on $PROBE_RC).
+    # All six case arms must be handled explicitly (we branch on $PROBE_RC).
     assert 'PROBE_RC=$?' in txt
     # 1 = no-fit must call fail.
     assert "target partition cannot run this shape" in txt.lower() or \
            "pick a different -p" in txt
-    # 2 = contested must have a 5s grace.
+    # 2 = contested must hand off to `_prompt_alternative` (interactive routing).
     probe_block_start = txt.index("[5/6] cluster probe")
     probe_block_end = txt.index("[6/6] sbatch --test-only")
     probe_block = txt[probe_block_start:probe_block_end]
     assert "fully allocated right now" in probe_block
-    assert "read -r -t 5" in probe_block
+    assert "_prompt_alternative" in probe_block
     # 3 = probe failed must NOT block; it warns and falls through.
     assert "couldn't query scontrol" in probe_block
+    # 4 = nothing-fits: every partition failed vram or blocklist; hard fail.
+    assert "no usable partition found" in probe_block.lower() or \
+           "nothing fits" in probe_block.lower()
+    # 5 = blocklisted target: user asked for a blocklisted partition; hard fail.
+    assert "blocklist" in probe_block.lower() or \
+           "not ours" in probe_block.lower()
 
 
 def test_submit_sh_forwards_overrides_to_probe():

@@ -22,7 +22,7 @@
 # to 8 GPUs, but getting all 8 on one node is effectively impossible due to
 # cluster contention. Default to 1 GPU; 4 is the soft cap.
 #
-# Only after all five pass does it submit with --exclude=aisurrey26 (flaky
+# Only after all six pass does it submit with --exclude=aisurrey26 (flaky
 # node, silent 1:0 exits observed 2026-04). See
 # ~/Documents/Claude/agent-context/aisurrey-cluster.md and
 # ~/Documents/Claude/agent-context/aisurrey-deploy.md for the deeper cluster

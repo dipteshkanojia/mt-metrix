@@ -51,9 +51,9 @@ default.
 - Per-partition wait-time estimate (`wait_s`):
   - `0` if `gpus_free >= gpus_requested` (we can start now).
   - Else estimate how long until *enough* GPUs free up. With
-    `deficit = gpus_requested - gpus_free + pending_gpu_demand_ahead`,
+    `deficit = gpus_requested - gpus_free + pending_gpu_demand`,
     take the `deficit`-th-smallest `time_left_s` across running jobs.
-    `pending_gpu_demand_ahead` is the sum of `num_gpus` across PD jobs
+    `pending_gpu_demand` is the sum of `num_gpus` across PD jobs
     whose priority-order precedes ours — we proxy this with "all PD
     jobs on that partition" since `squeue` output is already sorted by
     priority and `--reason` won't tell us who's ahead.
@@ -281,7 +281,7 @@ submit.sh preflight step [5/6]:
 - **`D-HH:MM:SS` / `HH:MM:SS` / `MM:SS` / `UNLIMITED` / `N/A` /
   `INVALID`** all handled by `parse_time_duration` returning
   `int | None`.
-- **Blocklisted partition is user's target** → exit 3, `submit.sh`
+- **Blocklisted partition is user's target** → exit 5, `submit.sh`
   refuses to submit and prints the reason (no prompt — user should pick
   a real partition, not a silent override).
 - **All partitions blocklisted or NO-FIT** → probe exits 4,
