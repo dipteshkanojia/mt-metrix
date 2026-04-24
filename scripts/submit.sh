@@ -147,6 +147,40 @@ _prompt_alternative() {
 }
 
 # ---------------------------------------------------------------------------
+# Count data rows in the cluster probe's alternatives TSV. Used by
+# submit.sh's CONTESTED handling to distinguish "user cancelled the
+# prompt" from "there was nothing to prompt about in the first place".
+#
+# Before this helper, the 2026-04-24 bug was: target partition CONTESTED
+# (e.g. a100 at 0/0 free, 31 pending), every other partition filtered
+# out (wrong VRAM / not-ours), so the probe emitted a header-only TSV.
+# _prompt_alternative saw parts=(), printed "no alternatives available"
+# and returned 7. submit.sh's case 2) treated rc==7 as "user cancelled"
+# and hard-failed with exit 1 — even though the user had explicitly
+# asked for a100 and there was nothing else to offer. The fix:
+# submit.sh now checks _alt_count before calling _prompt_alternative
+# and, on zero rows, stays on target and queues (sbatch --test-only's
+# transient-contention path handles the 5s confirm prompt from there).
+#
+# _alt_count(tsv_path)
+#   stdout: integer number of non-header, non-blank data rows.
+#           Missing file, empty string, or omitted arg → "0".
+#   exit:   always 0 (so callers can use it in `$( ... )` without
+#           tripping set -e).
+
+_alt_count() {
+    local tsv="${1:-}"
+    if [[ -z "$tsv" ]] || [[ ! -f "$tsv" ]]; then
+        echo 0
+        return 0
+    fi
+    # awk's `c+0` coerces an unset counter to 0 when no matching rows
+    # exist. NF>0 skips blank lines that would otherwise inflate the
+    # count on CRLF-terminated or trailing-newline inputs.
+    awk 'NR>1 && NF>0 {c++} END {print c+0}' "$tsv"
+}
+
+# ---------------------------------------------------------------------------
 # FreeMem check. CfgTRES tells you what the scheduler is allowed to hand
 # out; FreeMem tells you what the OS actually has free right now. SLURM's
 # select/cons_tres plugin rejects allocations whose --mem exceeds FreeMem
@@ -511,29 +545,45 @@ if [[ -f "$CLUSTER_PROBE" ]] && command -v python3 >/dev/null 2>&1; then
             if [[ "${STAY_ON_TARGET:-0}" == "1" ]]; then
                 yel "  --stay-on-target: skipping alternative prompt; staying on $PARTITION."
             elif [[ -f "$ALTS_TSV" ]]; then
-                set +e
-                _PROMPT_DEFAULT=""
-                [[ "$USER_EXPLICIT_P" == "1" ]] && _PROMPT_DEFAULT="$PARTITION"
-                ROUTE_TO=$(_prompt_alternative "$PARTITION" "$ALTS_TSV" "$_PROMPT_DEFAULT")
-                PROMPT_RC=$?
-                set -e
-                if [[ "$PROMPT_RC" -eq 7 ]]; then
-                    fail "user cancelled; not submitting"
-                elif [[ -n "$ROUTE_TO" ]] && [[ "$ROUTE_TO" != "$PARTITION" ]]; then
-                    ok "re-routing submission to $ROUTE_TO"
-                    # Rewrite any -p / --partition= arg already in EXTRA_ARGS,
-                    # else append -p <ROUTE_TO>.
-                    _REROUTED=0
-                    for ((i=0; i<${#EXTRA_ARGS[@]}; i++)); do
-                        case "${EXTRA_ARGS[$i]}" in
-                            -p) EXTRA_ARGS[$((i+1))]="$ROUTE_TO"; _REROUTED=1 ;;
-                            --partition=*) EXTRA_ARGS[$i]="--partition=$ROUTE_TO"; _REROUTED=1 ;;
-                        esac
-                    done
-                    if [[ "$_REROUTED" -eq 0 ]]; then
-                        EXTRA_ARGS+=("-p" "$ROUTE_TO")
+                # Distinguish "no alternatives existed" from "user cancelled".
+                # When the probe could rule out every non-target partition
+                # (wrong VRAM, not-ours, no-fit), the TSV has only a header
+                # row. In that case there is nothing to prompt about —
+                # staying on the target and queueing is the only useful
+                # answer; the sbatch --test-only step below handles the
+                # 5s confirm prompt for transient contention. See the
+                # 2026-04-24 CONTESTED-with-no-alts bug at the _alt_count
+                # definition.
+                _ALT_N=$(_alt_count "$ALTS_TSV")
+                if [[ "$_ALT_N" == "0" ]]; then
+                    yel "  no alternatives offered (every other partition ruled out);"
+                    yel "  staying on '$PARTITION' and queueing — sbatch will PD"
+                    yel "  until a slot frees."
+                else
+                    set +e
+                    _PROMPT_DEFAULT=""
+                    [[ "$USER_EXPLICIT_P" == "1" ]] && _PROMPT_DEFAULT="$PARTITION"
+                    ROUTE_TO=$(_prompt_alternative "$PARTITION" "$ALTS_TSV" "$_PROMPT_DEFAULT")
+                    PROMPT_RC=$?
+                    set -e
+                    if [[ "$PROMPT_RC" -eq 7 ]]; then
+                        fail "user cancelled; not submitting"
+                    elif [[ -n "$ROUTE_TO" ]] && [[ "$ROUTE_TO" != "$PARTITION" ]]; then
+                        ok "re-routing submission to $ROUTE_TO"
+                        # Rewrite any -p / --partition= arg already in EXTRA_ARGS,
+                        # else append -p <ROUTE_TO>.
+                        _REROUTED=0
+                        for ((i=0; i<${#EXTRA_ARGS[@]}; i++)); do
+                            case "${EXTRA_ARGS[$i]}" in
+                                -p) EXTRA_ARGS[$((i+1))]="$ROUTE_TO"; _REROUTED=1 ;;
+                                --partition=*) EXTRA_ARGS[$i]="--partition=$ROUTE_TO"; _REROUTED=1 ;;
+                            esac
+                        done
+                        if [[ "$_REROUTED" -eq 0 ]]; then
+                            EXTRA_ARGS+=("-p" "$ROUTE_TO")
+                        fi
+                        PARTITION="$ROUTE_TO"
                     fi
-                    PARTITION="$ROUTE_TO"
                 fi
             else
                 yel "  (no alternatives sidecar; continuing with transient warning)"

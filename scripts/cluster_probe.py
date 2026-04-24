@@ -1392,8 +1392,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"    Immediately available alternative: "
                       f"scripts/submit.sh <config> -p {recommended}")
             else:
-                print("    No ready alternative; sbatch would reject too. "
-                      "Wait for the queue to drain.")
+                print("    No ready alternative; submit.sh will stay on "
+                      "target and queue (sbatch places the job in PD "
+                      "until a slot frees).")
         elif not tf.vram_known:
             print(
                 f"  → {req.partition}: UNKNOWN-VRAM — partition has GPU "

@@ -55,6 +55,16 @@ EOF
     echo "$tmp"
 }
 
+_mkalts_one_row() {
+    local tmp
+    tmp=$(mktemp)
+    cat >"$tmp" <<'EOF'
+rank	partition	gpus_requested	wait_s	tier	reason
+1	nice-project	1	0	1	free now, group partition
+EOF
+    echo "$tmp"
+}
+
 t_pick_alt_1() {
     local alts; alts=$(_mkalts)
     local chosen
@@ -137,6 +147,48 @@ t_malformed_wait_s() {
     [[ "$chosen" == "nice-project" ]]
 }
 
+t_alt_count_three_rows() {
+    # Standard 3-row TSV. String-equality (not -eq) so an unimplemented
+    # helper that returns empty stdout doesn't pass by accident.
+    local alts; alts=$(_mkalts)
+    local n
+    n=$(_alt_count "$alts" 2>/dev/null)
+    [[ "$n" == "3" ]]
+}
+
+t_alt_count_one_row() {
+    local alts; alts=$(_mkalts_one_row)
+    local n
+    n=$(_alt_count "$alts" 2>/dev/null)
+    [[ "$n" == "1" ]]
+}
+
+t_alt_count_empty_tsv() {
+    # Header-only TSV — zero data rows. The bug: without _alt_count,
+    # submit.sh's case 2) hit _prompt_alternative with parts=(), got
+    # rc=7, and treated it as "user cancelled" even though the user
+    # never saw a prompt. _alt_count lets the caller distinguish
+    # "nothing to prompt about" from "user declined".
+    local alts; alts=$(_mkalts_empty)
+    local n
+    n=$(_alt_count "$alts" 2>/dev/null)
+    [[ "$n" == "0" ]]
+}
+
+t_alt_count_missing_file() {
+    # Missing file must return "0" cleanly, not crash under set -euo pipefail.
+    local n
+    n=$(_alt_count "/nonexistent/path/that/does/not/exist.tsv" 2>/dev/null)
+    [[ "$n" == "0" ]]
+}
+
+t_alt_count_no_arg() {
+    # Called with no argument — treat as missing file.
+    local n
+    n=$(_alt_count 2>/dev/null)
+    [[ "$n" == "0" ]]
+}
+
 t_timeout_honours_explicit_p() {
     # When submit.sh detects the user passed an explicit -p <target>, it
     # now hands the target as a 3rd arg to _prompt_alternative. If the
@@ -154,6 +206,8 @@ t_timeout_honours_explicit_p() {
 
 for t in t_pick_alt_1 t_pick_alt_2 t_cancel_c t_timeout_cancel t_auto_route \
          t_invalid_digit_out_of_range t_invalid_input t_empty_tsv t_malformed_wait_s \
+         t_alt_count_three_rows t_alt_count_one_row t_alt_count_empty_tsv \
+         t_alt_count_missing_file t_alt_count_no_arg \
          t_timeout_honours_explicit_p; do
     if $t; then
         echo "  PASS  $t"
