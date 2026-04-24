@@ -22,7 +22,7 @@ def small_segments():
             source="hello",
             target="bonjour",
             reference="salut",
-            gold=0.8,
+            gold_raw=0.8,
             lang_pair="en-fr",
             domain="general",
             segment_id=f"s{i:02d}",
@@ -95,7 +95,7 @@ def test_write_summary_shape(tmp_path: Path, small_segments, small_scores):
 
 def test_write_summary_correlation_when_gold_varies(tmp_path: Path):
     segs = [
-        Segment(source="a", target="b", gold=g, segment_id=f"s{i}")
+        Segment(source="a", target="b", gold_raw=g, segment_id=f"s{i}")
         for i, g in enumerate([0.1, 0.3, 0.5, 0.7, 0.9])
     ]
     # bleu here is perfectly correlated with gold

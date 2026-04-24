@@ -20,6 +20,12 @@ from mt_metrix.io.schema import Segment
 
 log = logging.getLogger(__name__)
 
+# Column names for which we've already emitted the legacy-gold deprecation
+# warning this process. Keyed on the mapped column name so a dataset with
+# the same config loaded twice doesn't re-warn, and two datasets with
+# different legacy mappings each warn once.
+_LEGACY_GOLD_WARNED: set[str] = set()
+
 
 # ---------------------------------------------------------------------------
 # Column-mapping helper
@@ -88,12 +94,15 @@ def _row_to_segment(
     # dataset deprecation warning so users migrate their configs to the
     # explicit form.
     if "gold" in columns and gold_raw is None and gold_z is None:
-        log.warning(
-            "dataset config uses legacy `gold:` column key (mapping column %r); "
-            "prefer explicit `gold_raw:` and/or `gold_z:` — this row's value "
-            "is being loaded as gold_raw. See docs/DATASETS.md.",
-            columns["gold"],
-        )
+        legacy_col = columns["gold"]
+        if legacy_col not in _LEGACY_GOLD_WARNED:
+            log.warning(
+                "dataset config uses legacy `gold:` column key (mapping column %r); "
+                "prefer explicit `gold_raw:` and/or `gold_z:` — this row's value "
+                "is being loaded as gold_raw. See docs/DATASETS.md.",
+                legacy_col,
+            )
+            _LEGACY_GOLD_WARNED.add(legacy_col)
         gold_raw = _resolve_gold(row, columns, key="gold")
 
     lang_pair = _resolve_column(row, columns.get("lang_pair")) or default_lang_pair
@@ -236,7 +245,7 @@ def _load_gyroqe(cfg: DatasetConfig) -> list[Segment]:
         "source": "source",
         "target": "target",
         "reference": "reference",
-        "gold": "z_mean",
+        "gold_z": "z_mean",
         "lang_pair": "lang_pair",
         "domain": "domain",
     }

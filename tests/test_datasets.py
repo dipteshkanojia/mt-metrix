@@ -371,3 +371,20 @@ def test_row_to_segment_invalid_gold_values_become_none():
     seg = _row_to_segment(row, columns, idx=0, default_lang_pair="en-es", default_domain="news")
     assert seg.gold_raw is None
     assert seg.gold_z is None
+
+
+def test_row_to_segment_legacy_gold_warning_fires_once_per_column(caplog):
+    """The legacy-gold deprecation warning must not spam once per row.
+
+    For a 10k-row dataset we want one warning, not 10k.
+    """
+    from mt_metrix.io.datasets import _LEGACY_GOLD_WARNED
+    _LEGACY_GOLD_WARNED.discard("g")  # reset for test isolation
+
+    row = {"src": "hi", "tgt": "hola", "g": "0.8"}
+    columns = {"source": "src", "target": "tgt", "gold": "g"}
+    with caplog.at_level(logging.WARNING, logger="mt_metrix.io.datasets"):
+        for _ in range(3):
+            _row_to_segment(row, columns, idx=0, default_lang_pair="en-es", default_domain="news")
+    hits = [r for r in caplog.records if "legacy `gold:` column key" in r.message]
+    assert len(hits) == 1
