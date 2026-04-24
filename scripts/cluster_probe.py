@@ -547,12 +547,22 @@ def parse_scontrol_node_line(line: str) -> Optional[Node]:
     primary_state, usable = _normalise_state(state_raw)
     parts_raw = kv.get("Partitions", "")
     partitions = [p for p in parts_raw.split(",") if p] if parts_raw else []
+    cfg_tres = kv.get("CfgTRES", "")
     gpu_type, gpu_total = _parse_gres_gpu(kv.get("Gres", ""))
+    # CfgTRES carries the canonical untyped ``gres/gpu=N`` count; use it
+    # as a fallback when the typed-Gres regex couldn't extract a count
+    # (e.g. live AISURREY a100 reports ``Gres=gpu:nvidia-a100-sxm4-80gb:8``
+    # — the hyphens defeat the [a-zA-Z0-9_]+ type pattern). Without this
+    # fallback ``--gres=gpu:N`` for N>queue_gpu_evidence wrongly flips to
+    # NO-FIT — observed 2026-04-24 on the tower72b submission (gpu:4).
+    if gpu_total == 0:
+        m = _ALLOC_GRES_GPU_RE.search(cfg_tres)
+        if m:
+            gpu_total = int(m.group(1))
     gpu_alloc = _parse_alloc_gpu(kv.get("AllocTRES", ""))
     # CfgTRES takes precedence over RealMemory for schedulable memory,
     # because MemSpecLimit reserves some of the physical RAM for the OS.
     cfg_mem_mb = 0
-    cfg_tres = kv.get("CfgTRES", "")
     mem_in_cfg = re.search(r"(?:^|,)mem=(\d+)([KMGT]?)", cfg_tres)
     if mem_in_cfg:
         n = int(mem_in_cfg.group(1))

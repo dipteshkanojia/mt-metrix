@@ -829,6 +829,67 @@ def test_check_fit_no_gpus_and_no_queue_evidence_is_no_fit(probe):
     ), fit.reasons
 
 
+# Live AISURREY a100 nodes report ``Gres=gpu:nvidia-a100-sxm4-80gb:8`` —
+# the typed-name component contains hyphens. The typed-Gres regex is
+# ``[a-zA-Z0-9_]+`` and rejects it, so ``_parse_gres_gpu`` returns 0.
+# CfgTRES, however, always has the canonical untyped ``gres/gpu=N`` count.
+# When the typed parse fails we must fall back to that, otherwise gpu:4
+# requests on a 8-GPU-per-node a100 partition flip to NO-FIT for the
+# wrong reason — observed 2026-04-24 on the tower72b submission.
+LIVE_A100_HYPHENATED_GRES_SCONTROL = (
+    "NodeName=aisurrey01 Arch=x86_64 CPUTot=32 "
+    "RealMemory=512000 "
+    "State=ALLOCATED "
+    "Gres=gpu:nvidia-a100-sxm4-80gb:8(IDX:0-7) "
+    "Partitions=a100 "
+    "AllocTRES=cpu=16,mem=256G,gres/gpu=8 "
+    "CfgTRES=cpu=32,mem=500G,gres/gpu=8"
+)
+
+
+def test_parse_scontrol_falls_back_to_cfgtres_gres_gpu(probe):
+    """Hyphenated GPU type defeats the typed-Gres regex; CfgTRES has the
+    canonical ``gres/gpu=N`` count and the parser must use it as a
+    fallback so the node reports the right total."""
+    n = probe.parse_scontrol_node_line(LIVE_A100_HYPHENATED_GRES_SCONTROL)
+    assert n is not None
+    assert n.gpu_total == 8, (
+        f"expected 8 from CfgTRES gres/gpu=8 fallback, got {n.gpu_total}"
+    )
+    assert n.gpu_alloc == 8
+
+
+def test_check_fit_gpu4_on_busy_a100_with_hyphenated_gres_is_contested(probe):
+    """End-to-end: live AISURREY a100 (hyphenated Gres + CfgTRES gres/gpu=8)
+    must NOT NO-FIT a gpu:4 request just because the queue evidence (max
+    pending num_gpus=1) is below 4. With the CfgTRES fallback,
+    max_gpu_per_node becomes 8 and the request fits structurally even
+    though the partition is busy."""
+    parts = _build_partition_with_queue(
+        probe,
+        LIVE_A100_HYPHENATED_GRES_SCONTROL,
+        _queue_for_busy_a100(probe),
+    )
+    p = parts["a100"]
+    assert p.max_gpu_per_node == 8, (
+        f"CfgTRES fallback should populate per-node ceiling to 8, "
+        f"got {p.max_gpu_per_node}"
+    )
+    req = probe.Request(
+        partition="a100", gpus=4, mem_mb=0, cpus=0, vram_need_gb=0,
+    )
+    fit = probe.check_fit(p, req)
+    assert fit.shape_ok is True, (
+        f"--gres=gpu:4 on a 8-GPU-per-node a100 partition must be "
+        f"shape_ok, got reasons={fit.reasons}"
+    )
+    assert fit.has_capacity_now is False
+    assert fit.status_word() == "contested"
+    assert not any(
+        "exceeds per-node GPU ceiling" in r for r in fit.reasons
+    ), fit.reasons
+
+
 def test_main_busy_a100_exits_contested_not_nothing_fits(probe, monkeypatch, tmp_path, capsys):
     """End-to-end: probe.main returns 2 (CONTESTED), not 4 (nothing
     fits), when the target partition is full but has a populated queue.
