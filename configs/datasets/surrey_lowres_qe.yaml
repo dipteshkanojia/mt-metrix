@@ -16,10 +16,14 @@
 #   index, original (source), translation (MT), scores (3 raters), mean,
 #   z_scores (3 z-normalised raters), z_mean, lang_pair.
 #
-# Target: z_mean — per-pair z-normalised DA, the ALOPE paper's headline
-# gold signal. `mean` is kept in meta for reference but not used for
-# correlation. The `lang_pair` column holds short pair-codes (e.g. `engu`,
-# `enhi`); tabulate will pivot on these verbatim.
+# Gold columns:
+#   gold_z   <- z_mean   (ALOPE paper's headline signal: z-normalised DA)
+#   gold_raw <- mean     (raw per-row DA average; useful for Tower GEMBA
+#                         scorers and sacrebleu, which live in raw DA space)
+# Both are kept on every Segment so summary.json and the per-scorer
+# correlation router can pick the fair space per scorer family. The
+# `lang_pair` column holds short pair-codes (e.g. `engu`, `enhi`);
+# tabulate pivots on these verbatim.
 #
 # QE-only — no reference column. Reference-based scorers (BLEU, chrF++,
 # TER, COMET-DA ref) are automatically skipped with a visible warning and
@@ -40,6 +44,7 @@ domain: lowres_qe
 columns:
   source: original
   target: translation
-  gold: z_mean
+  gold_raw: mean
+  gold_z: z_mean
   lang_pair: "@from:lang_pair"
   domain: "@constant:lowres_qe"
