@@ -73,7 +73,7 @@ _prompt_alternative() {
             wait_human="wait: ?"
         elif [[ "$wait_s" == "0" ]]; then
             wait_human="wait: now"
-        else
+        elif [[ "$wait_s" =~ ^[0-9]+$ ]]; then
             local hh=$((wait_s / 3600))
             local mm=$(((wait_s % 3600) / 60))
             if [[ "$hh" -gt 0 ]]; then
@@ -81,6 +81,8 @@ _prompt_alternative() {
             else
                 wait_human="wait: ${mm}m"
             fi
+        else
+            wait_human="wait: ?"
         fi
         labels+=("  $rank) $partition ($wait_human; tier=$tier; $reason)")
     done < "$alts_tsv"
@@ -153,6 +155,10 @@ Examples:
 SUBMIT_AUTO_ROUTE=1 scripts/submit.sh ...:
     Skip the interactive prompt and accept the probe's first
     recommendation. Intended for unattended scripts.
+
+SUBMIT_PROMPT_TIMEOUT=<seconds> scripts/submit.sh ...:
+    Override the interactive prompt's timeout (default 15s). No
+    keypress within this window cancels the submission.
 
 Every AISURREY sbatch goes through this wrapper. If you're tempted to run
 sbatch directly: don't. That's how partition / env / node typos get past
@@ -319,6 +325,7 @@ if [[ -f "$CLUSTER_PROBE" ]] && command -v python3 >/dev/null 2>&1; then
     # TSV sidecar: per-invocation temp file so stale data from a prior
     # failed run can't be misread. cluster_probe writes alternatives here.
     ALTS_TSV="$(mktemp)"
+    trap 'rm -f "${ALTS_TSV:-}"' EXIT
     PROBE_ARGS+=("--tee-alternatives" "$ALTS_TSV")
     # We want the probe's human-readable output streamed to the user.
     set +e
@@ -335,7 +342,7 @@ if [[ -f "$CLUSTER_PROBE" ]] && command -v python3 >/dev/null 2>&1; then
             if [[ "${STAY_ON_TARGET:-0}" == "1" ]]; then
                 :
             elif [[ -f "$ALTS_TSV" ]]; then
-                TOP_ALT=$(awk -F'\t' 'NR==2{print $2}' "$ALTS_TSV")
+                TOP_ALT=$(awk -F'\t' 'NR>1 && $1==1 {print $2; exit}' "$ALTS_TSV")
                 if [[ -n "$TOP_ALT" ]] && [[ "$TOP_ALT" != "$PARTITION" ]]; then
                     yel "  recommender prefers '$TOP_ALT' over '$PARTITION'."
                     set +e

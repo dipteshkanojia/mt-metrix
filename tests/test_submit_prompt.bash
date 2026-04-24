@@ -36,6 +36,25 @@ EOF
     echo "$tmp"
 }
 
+_mkalts_empty() {
+    local tmp
+    tmp=$(mktemp)
+    cat >"$tmp" <<'EOF'
+rank	partition	gpus_requested	wait_s	tier	reason
+EOF
+    echo "$tmp"
+}
+
+_mkalts_malformed_wait() {
+    local tmp
+    tmp=$(mktemp)
+    cat >"$tmp" <<'EOF'
+rank	partition	gpus_requested	wait_s	tier	reason
+1	nice-project	1	abc	1	malformed wait_s
+EOF
+    echo "$tmp"
+}
+
 t_pick_alt_1() {
     local alts; alts=$(_mkalts)
     local chosen
@@ -78,7 +97,48 @@ t_auto_route() {
     [[ "$chosen" == "nice-project" ]]
 }
 
-for t in t_pick_alt_1 t_pick_alt_2 t_cancel_c t_timeout_cancel t_auto_route; do
+t_invalid_digit_out_of_range() {
+    # "9" is a valid single digit but out-of-range for a 3-row TSV,
+    # so the numeric branch rejects it and the helper returns 7.
+    local alts; alts=$(_mkalts)
+    set +e
+    echo "9" | _prompt_alternative "a100" "$alts" >/dev/null 2>&1
+    rc=$?
+    set -e
+    [[ "$rc" -eq 7 ]]
+}
+
+t_invalid_input() {
+    # Non-digit, non-"c" input hits the catch-all branch and returns 7.
+    local alts; alts=$(_mkalts)
+    set +e
+    echo "xyz" | _prompt_alternative "a100" "$alts" >/dev/null 2>&1
+    rc=$?
+    set -e
+    [[ "$rc" -eq 7 ]]
+}
+
+t_empty_tsv() {
+    # Header-only TSV -> parts[] stays empty -> ${#parts[@]} -eq 0 -> rc 7.
+    local alts; alts=$(_mkalts_empty)
+    set +e
+    echo "1" | _prompt_alternative "a100" "$alts" >/dev/null 2>&1
+    rc=$?
+    set -e
+    [[ "$rc" -eq 7 ]]
+}
+
+t_malformed_wait_s() {
+    # wait_s="abc" must not crash the arithmetic under set -euo pipefail;
+    # the guard falls through to "wait: ?" and picking index 0 succeeds.
+    local alts; alts=$(_mkalts_malformed_wait)
+    local chosen
+    chosen=$(echo "1" | _prompt_alternative "a100" "$alts" 2>/dev/null || true)
+    [[ "$chosen" == "nice-project" ]]
+}
+
+for t in t_pick_alt_1 t_pick_alt_2 t_cancel_c t_timeout_cancel t_auto_route \
+         t_invalid_digit_out_of_range t_invalid_input t_empty_tsv t_malformed_wait_s; do
     if $t; then
         echo "  PASS  $t"
         ((pass++))
