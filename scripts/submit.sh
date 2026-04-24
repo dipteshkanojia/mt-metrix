@@ -41,16 +41,118 @@
 
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# Queue-aware alternative-picking prompt. See
+# docs/superpowers/specs/2026-04-23-queue-aware-cluster-probe-design.md.
+#
+# _prompt_alternative(target_partition, alts_tsv_path)
+#   stdin:  user input ("1"/"2"/"3" or "c"); no keypress within
+#           ${SUBMIT_PROMPT_TIMEOUT:-15}s = cancel
+#   stdout: chosen partition name on success
+#   exit:   0 = chosen partition printed on stdout
+#           7 = user cancelled (or timed out)
+#
+# Test hook: SUBMIT_TEST_SKIP_PREFLIGHT=1 makes submit.sh return after
+# defining helpers, so `bash tests/test_submit_prompt.bash` can source
+# it and call the helper directly without running scontrol/sbatch.
+
+_prompt_alternative() {
+    local target="$1"
+    local alts_tsv="$2"
+    local timeout="${SUBMIT_PROMPT_TIMEOUT:-15}"
+
+    # Read TSV. Skip header; build an array of partitions with per-line
+    # display strings for the prompt.
+    local parts=()
+    local labels=()
+    while IFS=$'\t' read -r rank partition gpus_req wait_s tier reason; do
+        [[ "$rank" == "rank" ]] && continue
+        parts+=("$partition")
+        local wait_human
+        if [[ -z "$wait_s" ]]; then
+            wait_human="wait: ?"
+        elif [[ "$wait_s" == "0" ]]; then
+            wait_human="wait: now"
+        else
+            local hh=$((wait_s / 3600))
+            local mm=$(((wait_s % 3600) / 60))
+            if [[ "$hh" -gt 0 ]]; then
+                wait_human="wait: ${hh}h${mm}m"
+            else
+                wait_human="wait: ${mm}m"
+            fi
+        fi
+        labels+=("  $rank) $partition ($wait_human; tier=$tier; $reason)")
+    done < "$alts_tsv"
+
+    if [[ "${#parts[@]}" -eq 0 ]]; then
+        echo "no alternatives available." >&2
+        return 7
+    fi
+
+    # Auto-route: env var overrides interactive prompt, picks alt 1.
+    if [[ "${SUBMIT_AUTO_ROUTE:-0}" == "1" ]]; then
+        echo "${parts[0]}"
+        return 0
+    fi
+
+    {
+        echo "Your target: $target"
+        echo "Recommender's ranking:"
+        for label in "${labels[@]}"; do
+            echo "$label"
+        done
+        echo -n "Pick 1-${#parts[@]} or c to cancel (${timeout}s, no default): "
+    } >&2
+
+    local choice=""
+    if ! read -r -t "$timeout" choice; then
+        echo >&2
+        echo "timed out; cancelling submission." >&2
+        return 7
+    fi
+    case "$choice" in
+        c|C) echo "cancelled." >&2; return 7 ;;
+        [0-9]|[0-9][0-9])
+            local idx=$((choice - 1))
+            if [[ "$idx" -lt 0 || "$idx" -ge "${#parts[@]}" ]]; then
+                echo "invalid choice '$choice'; cancelling." >&2
+                return 7
+            fi
+            echo "${parts[$idx]}"
+            return 0
+            ;;
+        *)
+            echo "invalid choice '$choice'; cancelling." >&2
+            return 7
+            ;;
+    esac
+}
+
+# Early exit for the test harness. Defines the helper above and returns
+# before running any of the pre-flight steps.
+if [[ "${SUBMIT_TEST_SKIP_PREFLIGHT:-0}" == "1" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 # ---------------------------------------------------------------- inputs
 
 if [[ $# -lt 1 ]]; then
     cat >&2 <<'EOF'
-Usage: scripts/submit.sh <config.yaml> [--dry-run] [sbatch overrides...]
+Usage: scripts/submit.sh <config.yaml> [--dry-run] [--stay-on-target] [sbatch overrides...]
 
 Examples:
     scripts/submit.sh configs/runs/surrey_legal_cometkiwi.yaml
     scripts/submit.sh configs/runs/example_quick.yaml -p 3090 --gres=gpu:1
     scripts/submit.sh configs/runs/surrey_legal_full_matrix.yaml --dry-run
+
+--stay-on-target:
+    Skip the interactive prompt if the cluster probe recommends a
+    different partition. Respects the partition you explicitly chose.
+
+SUBMIT_AUTO_ROUTE=1 scripts/submit.sh ...:
+    Skip the interactive prompt and accept the probe's first
+    recommendation. Intended for unattended scripts.
 
 Every AISURREY sbatch goes through this wrapper. If you're tempted to run
 sbatch directly: don't. That's how partition / env / node typos get past
@@ -61,10 +163,12 @@ fi
 
 CONFIG="$1"; shift
 DRY_RUN=0
+STAY_ON_TARGET=0
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) DRY_RUN=1; shift ;;
+        --stay-on-target) STAY_ON_TARGET=1; shift ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
@@ -212,6 +316,10 @@ if [[ -f "$CLUSTER_PROBE" ]] && command -v python3 >/dev/null 2>&1; then
             --cpus-per-task=*) PROBE_ARGS+=("--cpus" "${arg#--cpus-per-task=}") ;;
         esac
     done
+    # TSV sidecar: per-invocation temp file so stale data from a prior
+    # failed run can't be misread. cluster_probe writes alternatives here.
+    ALTS_TSV="$(mktemp)"
+    PROBE_ARGS+=("--tee-alternatives" "$ALTS_TSV")
     # We want the probe's human-readable output streamed to the user.
     set +e
     python3 "$CLUSTER_PROBE" "${PROBE_ARGS[@]}"
@@ -220,23 +328,84 @@ if [[ -f "$CLUSTER_PROBE" ]] && command -v python3 >/dev/null 2>&1; then
     case "$PROBE_RC" in
         0)
             ok "cluster probe: target partition has capacity"
+            # Even when target is READY, the recommender may prefer a
+            # different partition (tier / a100-penalty). Surface that
+            # choice unless the user said --stay-on-target or set
+            # SUBMIT_AUTO_ROUTE to accept it unattended.
+            if [[ "${STAY_ON_TARGET:-0}" == "1" ]]; then
+                :
+            elif [[ -f "$ALTS_TSV" ]]; then
+                TOP_ALT=$(awk -F'\t' 'NR==2{print $2}' "$ALTS_TSV")
+                if [[ -n "$TOP_ALT" ]] && [[ "$TOP_ALT" != "$PARTITION" ]]; then
+                    yel "  recommender prefers '$TOP_ALT' over '$PARTITION'."
+                    set +e
+                    ROUTE_TO=$(_prompt_alternative "$PARTITION" "$ALTS_TSV")
+                    PROMPT_RC=$?
+                    set -e
+                    if [[ "$PROMPT_RC" -eq 7 ]]; then
+                        fail "user cancelled; not submitting"
+                    elif [[ -n "$ROUTE_TO" ]] && [[ "$ROUTE_TO" != "$PARTITION" ]]; then
+                        ok "re-routing submission to $ROUTE_TO"
+                        _REROUTED=0
+                        for ((i=0; i<${#EXTRA_ARGS[@]}; i++)); do
+                            case "${EXTRA_ARGS[$i]}" in
+                                -p) EXTRA_ARGS[$((i+1))]="$ROUTE_TO"; _REROUTED=1 ;;
+                                --partition=*) EXTRA_ARGS[$i]="--partition=$ROUTE_TO"; _REROUTED=1 ;;
+                            esac
+                        done
+                        if [[ "$_REROUTED" -eq 0 ]]; then
+                            EXTRA_ARGS+=("-p" "$ROUTE_TO")
+                        fi
+                        PARTITION="$ROUTE_TO"
+                    fi
+                fi
+            fi
             ;;
         1)
-            # Genuine shape violation — no node in the partition can ever
-            # run this. Fall through to pre-flight #6 which will either
-            # confirm with sbatch --test-only shape logic or (if sbatch is
-            # unavailable) at least warn before submitting a doomed job.
-            red "  cluster probe rejected the target partition (see table above)."
+            red "  cluster probe rejected the target partition (shape violation)."
             fail "target partition cannot run this shape; pick a different -p"
             ;;
         2)
             yel "  cluster probe: target partition is fully allocated right now."
-            yel "        See recommendation above to switch partitions, or wait for capacity."
-            yel "        Ctrl-C within 5s to abort, or Enter to let --test-only decide..."
-            read -r -t 5 || true
+            if [[ "${STAY_ON_TARGET:-0}" == "1" ]]; then
+                yel "  --stay-on-target: skipping alternative prompt; staying on $PARTITION."
+            elif [[ -f "$ALTS_TSV" ]]; then
+                set +e
+                ROUTE_TO=$(_prompt_alternative "$PARTITION" "$ALTS_TSV")
+                PROMPT_RC=$?
+                set -e
+                if [[ "$PROMPT_RC" -eq 7 ]]; then
+                    fail "user cancelled; not submitting"
+                elif [[ -n "$ROUTE_TO" ]] && [[ "$ROUTE_TO" != "$PARTITION" ]]; then
+                    ok "re-routing submission to $ROUTE_TO"
+                    # Rewrite any -p / --partition= arg already in EXTRA_ARGS,
+                    # else append -p <ROUTE_TO>.
+                    _REROUTED=0
+                    for ((i=0; i<${#EXTRA_ARGS[@]}; i++)); do
+                        case "${EXTRA_ARGS[$i]}" in
+                            -p) EXTRA_ARGS[$((i+1))]="$ROUTE_TO"; _REROUTED=1 ;;
+                            --partition=*) EXTRA_ARGS[$i]="--partition=$ROUTE_TO"; _REROUTED=1 ;;
+                        esac
+                    done
+                    if [[ "$_REROUTED" -eq 0 ]]; then
+                        EXTRA_ARGS+=("-p" "$ROUTE_TO")
+                    fi
+                    PARTITION="$ROUTE_TO"
+                fi
+            else
+                yel "  (no alternatives sidecar; continuing with transient warning)"
+            fi
             ;;
         3)
             yel "  warn: cluster probe couldn't query scontrol; proceeding to --test-only."
+            ;;
+        4)
+            red "  cluster probe: no partition can fit this job shape at --gres=gpu:$GPU_COUNT."
+            fail "nothing fits; re-shape the job (scorers, gpus, mem)"
+            ;;
+        5)
+            red "  cluster probe: target partition '$PARTITION' is in the blocklist (not ours)."
+            fail "pick a partition that belongs to our group (start with nice-project)"
             ;;
         *)
             yel "  warn: cluster probe returned unexpected exit $PROBE_RC; proceeding."
