@@ -337,12 +337,38 @@ def _ordered_rows(records: list[RunRecord]) -> list[tuple[str, str, str]]:
                 if key not in seen:
                     seen.add(key)
                     row_keys.append(key)
-    # Then: anything with a domain we don't recognise, appended in stable order.
+    # Then: domains not in DOMAIN_ORDER (e.g. 'lowres_qe'). Keep their
+    # first-encounter order across records, but within each unknown domain
+    # still bucket rows by GROUP_ORDER so the paper table can't render the
+    # same group in two disjoint blocks. Models inside a group sort
+    # alphabetically for deterministic output across CI machines that see
+    # run directories in different filesystem orders.
+    known_doms = {d.lower() for d in DOMAIN_ORDER}
+    unknown_doms: list[str] = []
     for r in records:
-        key = (r.domain.lower(), r.group, r.model)
-        if key not in seen:
-            seen.add(key)
-            row_keys.append(key)
+        d = r.domain.lower()
+        if d not in known_doms and d not in unknown_doms:
+            unknown_doms.append(d)
+    for dom in unknown_doms:
+        for grp in GROUP_ORDER:
+            models_in_bucket = sorted({
+                r.model for r in records
+                if r.domain.lower() == dom and r.group == grp
+            })
+            for m in models_in_bucket:
+                key = (dom, grp, m)
+                if key not in seen:
+                    seen.add(key)
+                    row_keys.append(key)
+        # Any groups not in GROUP_ORDER — append in encounter order so a
+        # future scorer family isn't silently dropped by the renderer.
+        for r in records:
+            if r.domain.lower() != dom or r.group in GROUP_ORDER:
+                continue
+            key = (dom, r.group, r.model)
+            if key not in seen:
+                seen.add(key)
+                row_keys.append(key)
     return row_keys
 
 
@@ -360,10 +386,21 @@ def _pivot_cells(
     for r in records:
         key = (r.domain.lower(), r.group, r.model)
         value = getattr(r, metric)
-        cells.setdefault(key, {})[r.lang_pair] = Cell(
-            value=value,
-            skipped=(r.skipped_reason is not None),
-        )
+        new_skipped = r.skipped_reason is not None
+        existing = cells.setdefault(key, {}).get(r.lang_pair)
+        # A real value must never be overwritten by a skipped placeholder.
+        # Observed 2026-04-25: a retry run emitted skipped_reason=runtime
+        # for scorers that had run cleanly in a prior run — without this
+        # guard, the paper table showed em-dashes for rows whose numbers
+        # lived happily in results.csv from the earlier run.
+        if (
+            existing is not None
+            and existing.value is not None
+            and not existing.skipped
+            and new_skipped
+        ):
+            continue
+        cells[key][r.lang_pair] = Cell(value=value, skipped=new_skipped)
     # Best-in-column computation, per domain block.
     # For each (domain, lang_pair), find max(value) over all rows in that block
     # and mark those cells is_best=True (ties → all tied cells marked).
@@ -391,8 +428,22 @@ def _pivot_cells(
 
 
 def _row_avg(row_cells: dict[str, Cell]) -> float | None:
-    """Mean over non-NA values in the row, or None if nothing usable."""
-    vals = [c.value for c in row_cells.values() if c.value is not None and not c.skipped]
+    """Mean over non-NA values in the row's displayed columns, or None.
+
+    Restricted to ``LANG_ORDER`` (the visible columns) so the Avg cell
+    matches what a reader can verify by eye. Observed 2026-04-25: datasets
+    that ship extra pairs outside LANG_ORDER (e.g. Low-resource-QE-DA's
+    ``eten``/``neen``/``sien``) silently inflated Avg because the function
+    averaged over ``row_cells.values()`` — a row whose five displayed cells
+    meaned to 0.23 showed Avg=0.29.
+    """
+    vals = [
+        row_cells[lp].value
+        for lp in LANG_ORDER
+        if lp in row_cells
+        and row_cells[lp].value is not None
+        and not row_cells[lp].skipped
+    ]
     return sum(vals) / len(vals) if vals else None
 
 
